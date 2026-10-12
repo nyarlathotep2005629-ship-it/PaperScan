@@ -28,7 +28,10 @@ class SessionStoreInstrumentedTest {
             id = "test-session",
             createdAtEpochMillis = 1,
             updatedAtEpochMillis = 2,
-            pages = listOf(page("first", 90, true, ScanMode.TEXT), page("second", 0, false, ScanMode.COLOR)),
+            pages = listOf(
+                page("first", 90, true, ScanMode.TEXT),
+                cameraPage("second", 0, false, ScanMode.COLOR)
+            ),
             selectedPageId = "first"
         )
 
@@ -42,6 +45,9 @@ class SessionStoreInstrumentedTest {
         assertEquals(NormalizedPoint(0.1f, 0.2f), loaded.session.pages.first().corners?.topLeft)
         assertEquals(ScanMode.TEXT, loaded.session.pages.first().scanMode)
         assertEquals(ScanMode.COLOR, loaded.session.pages.last().scanMode)
+        assertEquals(SourceType.CAMERA, loaded.session.pages.last().sourceType)
+        assertEquals("captures/second.jpg", loaded.session.pages.last().workingRelativePath)
+        assertEquals(null, loaded.session.pages.last().sourceUri)
         files.deleteSessionFiles()
     }
 
@@ -61,5 +67,23 @@ class SessionStoreInstrumentedTest {
             NormalizedPoint(0.9f, 0.8f), NormalizedPoint(0.1f, 0.8f)
         ),
         detectionConfidence = DetectionConfidence.HIGH
+    )
+
+    private fun cameraPage(id: String, rotation: Int, flipped: Boolean, mode: ScanMode) = PageItem(
+        id = id,
+        sourceType = SourceType.CAMERA,
+        sourceUri = null,
+        workingRelativePath = "captures/$id.jpg",
+        thumbnailRelativePath = "thumbnails/$id.jpg",
+        sourceExifRotationDegrees = rotation,
+        sourceExifFlipped = flipped,
+        rotationQuarterTurns = 0,
+        scanMode = mode,
+        status = PageStatus.NEEDS_REVIEW,
+        corners = CornerPoints(
+            NormalizedPoint(0.1f, 0.2f), NormalizedPoint(0.9f, 0.2f),
+            NormalizedPoint(0.9f, 0.8f), NormalizedPoint(0.1f, 0.8f)
+        ),
+        detectionConfidence = DetectionConfidence.MEDIUM
     )
 }

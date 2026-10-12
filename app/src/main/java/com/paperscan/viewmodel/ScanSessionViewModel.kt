@@ -194,11 +194,7 @@ class ScanSessionViewModel(
             }
             result.onSuccess { page ->
                 val base = current.session ?: newSession()
-                val updated = base.copy(
-                    pages = base.pages + page,
-                    selectedPageId = base.selectedPageId ?: page.id,
-                    updatedAtEpochMillis = now()
-                )
+                val updated = SessionOperations.appendPage(base, page, now())
                 if (persist(updated)) {
                     _uiState.value = ScanSessionUiState(initialized = true, session = updated, recoveryAvailable = true)
                 }

@@ -6,6 +6,30 @@ import org.junit.Test
 
 class SessionOperationsTest {
     @Test
+    fun appendPage_cameraPage_keepsExistingPagesAndAppendsAtEnd() {
+        val session = session("A", "B", selected = "A")
+        val cameraPage = PageItem(
+            id = "C",
+            sourceType = SourceType.CAMERA,
+            sourceUri = null,
+            workingRelativePath = "captures/C.jpg",
+            thumbnailRelativePath = "thumbnails/C.jpg",
+            sourceExifRotationDegrees = 90,
+            sourceExifFlipped = false,
+            rotationQuarterTurns = 0,
+            scanMode = ScanMode.AUTO,
+            status = PageStatus.NEEDS_REVIEW
+        )
+
+        val actual = SessionOperations.appendPage(session, cameraPage, 10)
+
+        assertEquals(listOf("A", "B", "C"), actual.pages.map(PageItem::id))
+        assertEquals(SourceType.CAMERA, actual.pages.last().sourceType)
+        assertEquals("captures/C.jpg", actual.pages.last().workingRelativePath)
+        assertEquals("A", actual.selectedPageId)
+    }
+
+    @Test
     fun movePage_lastPagePrevious_preservesExpectedOrder() {
         val session = session("A", "B", "C")
 

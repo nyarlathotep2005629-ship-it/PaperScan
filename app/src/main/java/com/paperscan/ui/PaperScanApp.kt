@@ -69,6 +69,7 @@ fun PaperScanApp(viewModel: ScanSessionViewModel) {
                 session = uiState.session,
                 busy = uiState.busy,
                 viewModel = viewModel,
+                onCameraClick = { screen = AppScreen.CAMERA },
                 onImportClick = {
                     photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },

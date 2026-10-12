@@ -1,6 +1,12 @@
 package com.paperscan.model
 
 object SessionOperations {
+    fun appendPage(session: ScanSession, page: PageItem, now: Long): ScanSession = session.copy(
+        updatedAtEpochMillis = now,
+        pages = session.pages + page,
+        selectedPageId = session.selectedPageId ?: page.id
+    )
+
     fun movePage(session: ScanSession, fromIndex: Int, toIndex: Int, now: Long): ScanSession? {
         if (fromIndex !in session.pages.indices || toIndex !in session.pages.indices || fromIndex == toIndex) {
             return null

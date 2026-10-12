@@ -37,6 +37,7 @@ fun SessionScreen(
     session: ScanSession?,
     busy: Boolean,
     viewModel: ScanSessionViewModel,
+    onCameraClick: () -> Unit,
     onImportClick: () -> Unit,
     onCreatePdfClick: () -> Unit,
     onEditPage: (String) -> Unit,
@@ -66,19 +67,46 @@ fun SessionScreen(
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        OutlinedButton(onClick = onImportClick, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-            Text("画像を追加")
-        }
-        Spacer(Modifier.height(8.dp))
-        Button(
-            onClick = onCreatePdfClick,
-            enabled = !busy && pages.isNotEmpty(),
-            modifier = Modifier.fillMaxWidth().semantics { testTag = "session_create_pdf" }
-        ) { Text("PDFを作成") }
-        OutlinedButton(onClick = onHomeClick, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-            Text("ホームへ戻る")
-        }
+        SessionActionButtons(
+            pageCount = pages.size,
+            busy = busy,
+            onCameraClick = onCameraClick,
+            onImportClick = onImportClick,
+            onCreatePdfClick = onCreatePdfClick,
+            onHomeClick = onHomeClick
+        )
+    }
+}
+
+@Composable
+fun SessionActionButtons(
+    pageCount: Int,
+    busy: Boolean,
+    onCameraClick: () -> Unit,
+    onImportClick: () -> Unit,
+    onCreatePdfClick: () -> Unit,
+    onHomeClick: () -> Unit
+) {
+    Spacer(Modifier.height(8.dp))
+    OutlinedButton(
+        onClick = onCameraClick,
+        enabled = !busy,
+        modifier = Modifier.fillMaxWidth()
+    ) { Text("撮影して追加") }
+    Spacer(Modifier.height(8.dp))
+    OutlinedButton(
+        onClick = onImportClick,
+        enabled = !busy,
+        modifier = Modifier.fillMaxWidth()
+    ) { Text("画像から追加") }
+    Spacer(Modifier.height(8.dp))
+    Button(
+        onClick = onCreatePdfClick,
+        enabled = !busy && pageCount > 0,
+        modifier = Modifier.fillMaxWidth().semantics { testTag = "session_create_pdf" }
+    ) { Text("PDFを作成") }
+    OutlinedButton(onClick = onHomeClick, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+        Text("ホームへ戻る")
     }
 }
 
