@@ -15,7 +15,7 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class PhotoImportServiceInstrumentedTest {
     @Test
-    fun importUris_deduplicatesFileUris_andDoesNotModifyOriginalBytes() = runBlocking {
+    fun importUris_countsInputAndExistingDuplicates_andDoesNotModifyOriginalBytes() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val files = WorkingFileStore(context)
         files.deleteSessionFiles()
@@ -29,13 +29,22 @@ class PhotoImportServiceInstrumentedTest {
 
         val service = PhotoImportService(context, files, SourceImageLoader(context, files))
         val uri = Uri.fromFile(source)
-        val result = service.importUris(listOf(uri, uri), emptySet())
+        val inputDuplicateResult = service.importUris(listOf(uri, uri), emptySet())
 
-        assertEquals(1, result.pages.size)
-        assertEquals(1, result.duplicateCount)
-        assertEquals(0, result.failures)
-        assertEquals(uri.toString(), result.pages.single().sourceUri)
-        assertTrue(result.pages.single().workingRelativePath != null)
+        assertEquals(1, inputDuplicateResult.pages.size)
+        assertEquals(1, inputDuplicateResult.duplicateCount)
+        assertEquals(0, inputDuplicateResult.failures)
+        assertEquals(uri.toString(), inputDuplicateResult.pages.single().sourceUri)
+        assertTrue(inputDuplicateResult.pages.single().workingRelativePath != null)
+        assertTrue(source.readBytes().contentEquals(before))
+
+        val existingDuplicateResult = service.importUris(
+            uris = listOf(uri),
+            existingUris = setOf(uri.toString())
+        )
+        assertTrue(existingDuplicateResult.pages.isEmpty())
+        assertEquals(1, existingDuplicateResult.duplicateCount)
+        assertEquals(0, existingDuplicateResult.failures)
         assertTrue(source.readBytes().contentEquals(before))
 
         files.deleteSessionFiles()

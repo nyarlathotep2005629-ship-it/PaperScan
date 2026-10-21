@@ -7,7 +7,7 @@
 | `testDebugUnitTest` | PASS | 18/18（4 test class、失敗0、Error0、Skipped0） |
 | `lintDebug` | PASS | Gradle `BUILD SUCCESSFUL`。既存のdeprecated warningのみ |
 | `assembleDebug` | PASS | Debug APK生成 |
-| `assembleDebugAndroidTest` | PASS | 既存10件 + 今回追加3件を含むInstrumentation APKコンパイル |
+| `assembleDebugAndroidTest` | PASS | 既存10件 + 今回追加3件、合計13件を含むInstrumentation APKコンパイル |
 | Instrumentation test実行 | NOT RUN | `emulator-5562` が `offline`。ADB `device offline` |
 | 実機カメラ / 実画像品質 | NOT RUN | 実端末未接続 |
 | Import→Session→PDF→SAF実機統合 | NOT RUN | OS Picker/SAF実行環境なし |
@@ -20,15 +20,24 @@ PaperScanの隔離コピーで次を実行した。
 cmd.exe /d /c gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --no-daemon
 ```
 
-初回は追加テストの `ScanSession` 位置引数の記述ミスでAndroidTestコンパイルが止まった。テストコードを名前付き引数へ修正し、同じコマンドを再実行して全タスクが成功した。製品本番コードは変更していない。
+- 実行環境: Windows 10.0.26200 x64、Android SDK `C:\Android\Sdk`、Gradle 9.4.1
+- レビュー再確認: 2026-10-21 21:29:13.228–21:29:30.670 JST、`BUILD SUCCESSFUL`、exit 0
+- Unit XML: 2026-10-21 21:23:24 JST、18 tests、failure 0、error 0、skipped 0
+- ADB確認: 2026-10-21 21:29:30.672 JST、`emulator-5562 offline`
+
+初回は追加テストの `ScanSession` 位置引数の記述ミスでAndroidTestコンパイルが止まった。テストコードを名前付き引数へ修正し、同じコマンドを再実行して全タスクが成功した。
+
+レビューで `duplicateCount` の期待値と実装の不一致を確認した。契約を「今回渡されたURIのうち、入力内重複または既存セッションとの重複により追加されなかった選択数」とし、`uris.size - newUris.size` で数える最小限の本番コード変更を行った。Import成功/失敗数、fallback copy、Session/PDF/SAFの処理は変更していない。
 
 ## 今回追加したテスト
 
-- `PhotoImportServiceInstrumentedTest.importUris_deduplicatesFileUris_andDoesNotModifyOriginalBytes`
+- `PhotoImportServiceInstrumentedTest.importUris_countsInputAndExistingDuplicates_andDoesNotModifyOriginalBytes`
 - `SessionStoreRecoveryInstrumentedTest.load_corruptedSession_returnsCorruptedWithoutThrowing`
 - `PdfExporterInstrumentedTest.export_invalidSource_returnsFailure_andDoesNotLeavePartialPdf`
 
-これらはInstrumentation APKへコンパイルされているが、端末offlineのため実行結果は `NOT RUN` である。コンパイル成功をテスト成功へ変換しない。
+PhotoImportテストは、同じURIを1入力内へ2回渡した場合と、既存セッションに同じURIがある場合を別々に検証し、どちらも `duplicateCount=1` であることを要求する。元画像バイト列不変も両経路で確認する。
+
+これらはInstrumentation APKへコンパイルされているが、`adb devices -l` で `emulator-5562 offline` のため実行結果は `NOT RUN` である。コンパイル成功をテスト成功へ変換しない。
 
 ## 残存未検証
 

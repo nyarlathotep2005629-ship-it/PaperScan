@@ -8,7 +8,7 @@
 
 | 優先度 | 要求 / テスト範囲 | 現行実装の確認 | 既存テスト | 今回の対応 | 現在の判定 |
 |---|---|---|---|---|---|
-| P0 | Photo Picker / Import、複数URI、重複 | `PhotoImportService` と `PickVisualMedia` を確認 | 既存テストなし | `PhotoImportServiceInstrumentedTest` を追加 | 実機/Instrumentation実行まではNOT RUN |
+| P0 | Photo Picker / Import、複数URI、入力内重複、既存Session重複 | `PhotoImportService` と `PickVisualMedia` を確認。`duplicateCount` は重複により追加されなかった選択数 | 既存テストなし | 両重複経路を分けて確認する `PhotoImportServiceInstrumentedTest` を追加 | APKコンパイルPASS、実機/Instrumentation実行はNOT RUN |
 | P0 | 元画像非破壊 | Importはfallbackへコピーする実装 | 明示テストなし | Import元バイト列不変テストを追加 | 実機/Instrumentation実行まではNOT RUN |
 | P0 | PDF成功 | `PdfExporter`、A4、順序、PdfRenderer確認 | 既存1件、stress 1件 | 変更なし | 現行記録では過去Instrumentation結果を再実行していない |
 | P0 | PDF失敗 | `ExportResult.Failure` と出力削除を確認 | 明示テストなし | 不正画像で失敗・未完成PDFなしを追加 | 実行まではNOT RUN |
@@ -22,7 +22,7 @@
 
 ## 追加テストの意図
 
-- `PhotoImportServiceInstrumentedTest`: Photo PickerのOS UIを再現せず、アプリ側Import契約（重複排除、fallback、元画像非破壊）を確認する。
+- `PhotoImportServiceInstrumentedTest`: Photo PickerのOS UIを再現せず、アプリ側Import契約（入力内重複、既存Session重複、fallback、元画像非破壊）を確認する。
 - `SessionStoreRecoveryInstrumentedTest`: 破損した正本JSONをクラッシュさせず `Corrupted` として返す契約を確認する。
 - `PdfExporterInstrumentedTest.export_invalidSource_returnsFailure_andDoesNotLeavePartialPdf`: 画像デコード失敗を成功扱いにせず、一時PDFを残さない契約を確認する。
 

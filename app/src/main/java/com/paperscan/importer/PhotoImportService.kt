@@ -37,7 +37,7 @@ class PhotoImportService(
             }
             ImportResult(
                 pages = pages,
-                duplicateCount = distinctUris.size - newUris.size,
+                duplicateCount = uris.size - newUris.size,
                 failures = newUris.size - pages.size
             )
         }
