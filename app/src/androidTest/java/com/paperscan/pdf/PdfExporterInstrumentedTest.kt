@@ -57,6 +57,43 @@ class PdfExporterInstrumentedTest {
         files.cleanupStaleCache()
     }
 
+    @Test
+    fun export_invalidSource_returnsFailure_andDoesNotLeavePartialPdf() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val files = WorkingFileStore(context)
+        files.deleteSessionFiles()
+        files.cleanupStaleCache()
+        val invalid = files.fallbackImportFile("invalid", "png")
+        invalid.writeBytes(byteArrayOf(0, 1, 2, 3))
+        val page = PageItem(
+            id = "invalid",
+            sourceType = SourceType.IMPORT,
+            sourceUri = null,
+            workingRelativePath = files.relativeFallbackPath(invalid),
+            thumbnailRelativePath = null,
+            sourceExifRotationDegrees = 0,
+            sourceExifFlipped = false,
+            rotationQuarterTurns = 0,
+            scanMode = ScanMode.AUTO,
+            status = PageStatus.READY
+        )
+        val session = ScanSession(
+            id = "pdf-failure-test",
+            createdAtEpochMillis = 1,
+            updatedAtEpochMillis = 1,
+            pages = listOf(page),
+            selectedPageId = page.id
+        )
+        val exporter = PdfExporter(OpenCvDocumentProcessor(SourceImageLoader(context, files)), files)
+
+        val result = exporter.export(session) { _, _ -> }
+
+        assertTrue(result is ExportResult.Failure)
+        assertTrue(!files.exportTempFile(session.id).exists())
+        files.deleteSessionFiles()
+        files.cleanupStaleCache()
+    }
+
     private fun createPage(files: WorkingFileStore, id: String, color: Int): PageItem {
         val file = files.fallbackImportFile(id, "png")
         val bitmap = Bitmap.createBitmap(595, 842, Bitmap.Config.ARGB_8888).apply { eraseColor(color) }

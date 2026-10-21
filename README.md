@@ -29,4 +29,4 @@ Android向けローカル完結型ドキュメントスキャナです。
 
 `Physical-device acceptance test pending`
 
-要件定義、基本設計、詳細設計、テスト仕様および環境記録は [docs/](docs/) を参照してください。
+要件定義、基本設計、詳細設計、テスト仕様、テスト不足・対応状況および環境記録は [docs/](docs/) を参照してください。今回の不足整理は [`docs/TEST_GAP_MATRIX_2026-10-21.md`](docs/TEST_GAP_MATRIX_2026-10-21.md)、実行結果は [`docs/TEST_RESULT_2026-10-21.md`](docs/TEST_RESULT_2026-10-21.md) に記録しています。
