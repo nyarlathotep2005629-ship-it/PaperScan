@@ -12,7 +12,10 @@ import com.paperscan.model.NormalizedTextBounds
 import com.paperscan.model.OcrStatus
 import com.paperscan.model.OcrTextLine
 import com.paperscan.model.PageOcrResult
+import com.paperscan.model.OcrLanguage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -22,6 +25,8 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
 class SessionStore(private val workingFileStore: WorkingFileStore) {
+    private val saveMutex = Mutex()
+
     sealed interface LoadResult {
         data object Missing : LoadResult
         data class Loaded(val session: ScanSession) : LoadResult
@@ -41,16 +46,20 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
     }
 
     suspend fun saveAtomic(session: ScanSession): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
+        saveMutex.withLock {
             val target = workingFileStore.sessionFile
-            target.parentFile?.mkdirs()
             val temporary = File(target.parentFile, "${target.name}.tmp")
-            FileOutputStream(temporary).use { output ->
-                output.write(serialize(session).toByteArray(Charsets.UTF_8))
-                output.fd.sync()
+            runCatching {
+                target.parentFile?.mkdirs()
+                FileOutputStream(temporary).use { output ->
+                    output.write(serialize(session).toByteArray(Charsets.UTF_8))
+                    output.fd.sync()
+                }
+                parse(temporary.readText(Charsets.UTF_8))
+                replacePreservingOldFile(temporary, target)
+            }.onFailure {
+                temporary.delete()
             }
-            parse(temporary.readText(Charsets.UTF_8))
-            replacePreservingOldFile(temporary, target)
         }
     }
 
@@ -126,6 +135,7 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
         put("rotationQuarterTurns", rotationQuarterTurns)
         put("scanMode", scanMode.name)
         put("status", status.name)
+        put("ocrLanguage", ocrLanguage.name)
         corners?.let { points ->
             put("corners", JSONArray().apply {
                 points.points.forEach { point ->
@@ -175,6 +185,7 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
                 detectionConfidence = json.optString("detectionConfidence")
                     .takeIf { it.isNotBlank() }
                     ?.let(DetectionConfidence::valueOf),
+                ocrLanguage = OcrLanguage.valueOf(json.optString("ocrLanguage", OcrLanguage.AUTO.name)),
                 ocrResult = json.optJSONObject("ocrResult")?.let { result ->
                     PageOcrResult(
                         revision = result.getString("revision"),

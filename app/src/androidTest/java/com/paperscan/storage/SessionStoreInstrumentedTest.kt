@@ -3,6 +3,7 @@ package com.paperscan.storage
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.paperscan.model.PageItem
+import com.paperscan.model.OcrLanguage
 import com.paperscan.model.PageStatus
 import com.paperscan.model.ScanMode
 import com.paperscan.model.ScanSession
@@ -15,13 +16,89 @@ import com.paperscan.model.OcrStatus
 import com.paperscan.model.OcrTextLine
 import com.paperscan.model.PageOcrResult
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class SessionStoreInstrumentedTest {
+    @Test
+    fun saveAtomic_TC_SESSION_008_concurrentRequestsRemainValidAndDoNotShareTempWrites() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val files = WorkingFileStore.forIsolatedTest(context)
+        val store = SessionStore(files)
+        try {
+            val results = (0 until 12).map { index ->
+                async { store.saveAtomic(emptySession("concurrent-$index")) }
+            }.awaitAll()
+
+            assertTrue("every serialized save should report success", results.all { it.isSuccess })
+            val loaded = store.load()
+            assertTrue("final session must remain parseable", loaded is SessionStore.LoadResult.Loaded)
+            assertTrue((loaded as SessionStore.LoadResult.Loaded).session.id.startsWith("concurrent-"))
+            assertFalse(File(files.sessionFile.parentFile, "${files.sessionFile.name}.tmp").exists())
+        } finally {
+            files.deleteSessionFiles()
+        }
+    }
+
+    @Test
+    fun saveAtomic_TC_SESSION_009_rejectedFutureSchemaLeavesPreviousSessionIntact() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val files = WorkingFileStore.forIsolatedTest(context)
+        val store = SessionStore(files)
+        try {
+            assertTrue(store.saveAtomic(emptySession("known-good")).isSuccess)
+
+            val failure = store.saveAtomic(emptySession("future", schemaVersion = ScanSession.CURRENT_SCHEMA_VERSION + 1))
+
+            assertTrue(failure.isFailure)
+            val loaded = store.load() as SessionStore.LoadResult.Loaded
+            assertEquals("known-good", loaded.session.id)
+            assertFalse(File(files.sessionFile.parentFile, "${files.sessionFile.name}.tmp").exists())
+        } finally {
+            files.deleteSessionFiles()
+        }
+    }
+
+    @Test
+    fun load_TC_SESSION_010_futureSchemaIsReportedAsCorrupted() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val files = WorkingFileStore.forIsolatedTest(context)
+        try {
+            files.sessionFile.parentFile?.mkdirs()
+            files.sessionFile.writeText(
+                """{"schemaVersion":999,"id":"future","createdAtEpochMillis":1,"updatedAtEpochMillis":1,"pages":[],"selectedPageId":null}""",
+                Charsets.UTF_8
+            )
+
+            assertTrue(SessionStore(files).load() is SessionStore.LoadResult.Corrupted)
+        } finally {
+            files.deleteSessionFiles()
+        }
+    }
+
+    @Test
+    fun load_TC_SESSION_011_malformedJsonIsReportedWithoutReplacingSource() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val files = WorkingFileStore.forIsolatedTest(context)
+        val malformed = "{not-json"
+        try {
+            files.sessionFile.parentFile?.mkdirs()
+            files.sessionFile.writeText(malformed, Charsets.UTF_8)
+
+            assertTrue(SessionStore(files).load() is SessionStore.LoadResult.Corrupted)
+            assertEquals(malformed, files.sessionFile.readText(Charsets.UTF_8))
+        } finally {
+            files.deleteSessionFiles()
+        }
+    }
+
     @Test
     fun saveAndLoad_roundTrip_preservesExifAndPageOrder() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -34,6 +111,7 @@ class SessionStoreInstrumentedTest {
             updatedAtEpochMillis = 2,
             pages = listOf(
                 page("first", 90, true, ScanMode.TEXT).copy(
+                    ocrLanguage = OcrLanguage.JAPANESE,
                     ocrResult = PageOcrResult(
                         revision = "revision-first",
                         status = OcrStatus.COMPLETE,
@@ -56,6 +134,7 @@ class SessionStoreInstrumentedTest {
         assertEquals(NormalizedPoint(0.1f, 0.2f), loaded.session.pages.first().corners?.topLeft)
         assertEquals(ScanMode.TEXT, loaded.session.pages.first().scanMode)
         assertEquals("日本語 PaperScan", loaded.session.pages.first().ocrResult?.text)
+        assertEquals(OcrLanguage.JAPANESE, loaded.session.pages.first().ocrLanguage)
         assertEquals("revision-first", loaded.session.pages.first().ocrResult?.revision)
         assertEquals(ScanMode.COLOR, loaded.session.pages.last().scanMode)
         assertEquals(SourceType.CAMERA, loaded.session.pages.last().sourceType)
@@ -70,7 +149,7 @@ class SessionStoreInstrumentedTest {
         val files = WorkingFileStore.forIsolatedTest(context)
         files.sessionFile.parentFile?.mkdirs()
         files.sessionFile.writeText(
-            """{"schemaVersion":1,"id":"legacy","createdAtEpochMillis":1,"updatedAtEpochMillis":2,"pages":[],"selectedPageId":null}""",
+            """{"schemaVersion":1,"id":"legacy","createdAtEpochMillis":1,"updatedAtEpochMillis":2,"pages":[{"id":"legacy-page","sourceType":"IMPORT","sourceUri":"content://fixture/legacy","workingRelativePath":null,"thumbnailRelativePath":null,"sourceExifRotationDegrees":0,"sourceExifFlipped":false,"rotationQuarterTurns":0}],"selectedPageId":"legacy-page"}""",
             Charsets.UTF_8
         )
         val store = SessionStore(files)
@@ -78,6 +157,7 @@ class SessionStoreInstrumentedTest {
         val loaded = store.load() as SessionStore.LoadResult.Loaded
 
         assertEquals(ScanSession.CURRENT_SCHEMA_VERSION, loaded.session.schemaVersion)
+        assertEquals(OcrLanguage.AUTO, loaded.session.pages.single().ocrLanguage)
         assertTrue(store.saveAtomic(loaded.session).isSuccess)
         assertTrue(files.sessionFile.readText(Charsets.UTF_8).contains("\"schemaVersion\":${ScanSession.CURRENT_SCHEMA_VERSION}"))
         files.deleteSessionFiles()
@@ -117,5 +197,14 @@ class SessionStoreInstrumentedTest {
             NormalizedPoint(0.9f, 0.8f), NormalizedPoint(0.1f, 0.8f)
         ),
         detectionConfidence = DetectionConfidence.MEDIUM
+    )
+
+    private fun emptySession(id: String, schemaVersion: Int = ScanSession.CURRENT_SCHEMA_VERSION) = ScanSession(
+        schemaVersion = schemaVersion,
+        id = id,
+        createdAtEpochMillis = 1,
+        updatedAtEpochMillis = 1,
+        pages = emptyList(),
+        selectedPageId = null
     )
 }

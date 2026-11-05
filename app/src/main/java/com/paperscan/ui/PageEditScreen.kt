@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -41,6 +43,7 @@ import com.paperscan.model.DisplayPoint
 import com.paperscan.model.DisplayedImageBounds
 import com.paperscan.model.NormalizedPoint
 import com.paperscan.model.PageItem
+import com.paperscan.model.OcrLanguage
 import com.paperscan.model.OcrStatus
 import com.paperscan.model.ScanMode
 import com.paperscan.model.ocrRevision
@@ -54,12 +57,14 @@ fun PageEditScreen(
     onCornerChanged: (Int, NormalizedPoint) -> Unit,
     onSaveCorners: () -> Unit,
     onScanModeChanged: (ScanMode) -> Unit,
+    onOcrLanguageChanged: (OcrLanguage) -> Unit,
     onRotate: () -> Unit,
     onRedetect: () -> Unit,
     onRecognize: () -> Unit,
     onBack: () -> Unit
 ) {
     var showCorrected by remember(page.id) { mutableStateOf(false) }
+    var languageMenuExpanded by remember(page.id) { mutableStateOf(false) }
     val corners = state.cornerDraft?.editableCorners ?: page.corners ?: CornerPoints.fullImage()
     val preview = if (showCorrected) state.corrected ?: state.original else state.original
     val context = LocalContext.current
@@ -106,6 +111,28 @@ fun PageEditScreen(
                         enabled = !busy && !state.loading,
                         modifier = Modifier.weight(1f).semantics { testTag = "scan_mode_${mode.name}" }
                     ) { Text(mode.name) }
+                }
+            }
+        }
+        Text("OCR言語", style = MaterialTheme.typography.labelLarge)
+        Box(modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                onClick = { languageMenuExpanded = true },
+                enabled = !busy && !state.loading && !state.ocrRunning,
+                modifier = Modifier.fillMaxWidth().semantics { testTag = "ocr_language_selector" }
+            ) { Text("認識言語: ${page.ocrLanguage.label}") }
+            DropdownMenu(
+                expanded = languageMenuExpanded,
+                onDismissRequest = { languageMenuExpanded = false }
+            ) {
+                OcrLanguage.entries.forEach { language ->
+                    DropdownMenuItem(
+                        text = { Text(language.label) },
+                        onClick = {
+                            languageMenuExpanded = false
+                            if (language != page.ocrLanguage) onOcrLanguageChanged(language)
+                        }
+                    )
                 }
             }
         }

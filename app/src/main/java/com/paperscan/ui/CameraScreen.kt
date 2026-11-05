@@ -9,6 +9,7 @@ import android.view.View
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
@@ -17,6 +18,7 @@ import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,10 +45,13 @@ import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTag
@@ -55,6 +60,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.paperscan.model.PageItem
 import com.paperscan.viewmodel.ScanSessionViewModel
+import java.util.concurrent.Executors
 
 @Composable
 fun CameraScreen(
@@ -111,8 +117,18 @@ private fun CameraPreview(
         PreviewView(context).apply {
             // A scan needs the whole source frame, rather than a screen-filling crop.
             scaleType = PreviewView.ScaleType.FIT_CENTER
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             setBackgroundColor(Color.BLACK)
         }
+    }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    var liveCorners by remember { mutableStateOf<List<Offset>?>(null) }
+    val liveAnalyzer = remember(previewView, viewModel) {
+        com.paperscan.camera.LiveDocumentAnalyzer(
+            previewView = previewView,
+            detect = viewModel::detectCameraFrame,
+            onCorners = { points -> liveCorners = points?.map { Offset(it.x, it.y) } }
+        )
     }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var cameraError by remember { mutableStateOf<String?>(null) }
@@ -138,6 +154,13 @@ private fun CameraPreview(
         onDispose { previewView.removeOnLayoutChangeListener(layoutListener) }
     }
 
+    DisposableEffect(liveAnalyzer, analysisExecutor) {
+        onDispose {
+            liveAnalyzer.close()
+            analysisExecutor.shutdownNow()
+        }
+    }
+
     DisposableEffect(lifecycleOwner, flashEnabled, previewReady, targetRotation) {
         if (!previewReady) {
             onDispose { }
@@ -160,9 +183,16 @@ private fun CameraPreview(
                         .setTargetRotation(targetRotation)
                         .setFlashMode(if (flashEnabled) ImageCapture.FLASH_MODE_ON else ImageCapture.FLASH_MODE_OFF)
                         .build()
+                    val imageAnalysis = ImageAnalysis.Builder()
+                        .setResolutionSelector(resolutionSelector)
+                        .setTargetRotation(targetRotation)
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+                    imageAnalysis.setAnalyzer(analysisExecutor, liveAnalyzer)
                     val useCaseGroup = UseCaseGroup.Builder()
                         .addUseCase(preview)
                         .addUseCase(capture)
+                        .addUseCase(imageAnalysis)
                         .setViewPort(requireNotNull(previewView.viewPort))
                         .build()
                     val camera = provider!!.bindToLifecycle(
@@ -172,6 +202,7 @@ private fun CameraPreview(
                     )
                     // CameraX normally starts here, but make the no-zoom requirement explicit on every rebind.
                     camera.cameraControl.setZoomRatio(INITIAL_ZOOM_RATIO)
+                    liveAnalyzer.resetForRebind()
                     imageCapture = capture
                     cameraError = null
                 }.onFailure {
@@ -182,6 +213,7 @@ private fun CameraPreview(
             providerFuture.addListener(bind, ContextCompat.getMainExecutor(context))
             onDispose {
                 imageCapture = null
+                liveAnalyzer.resetForRebind()
                 provider?.unbindAll()
             }
         }
@@ -190,6 +222,14 @@ private fun CameraPreview(
     Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(
             factory = { previewView },
+            modifier = Modifier
+                .align(Alignment.Center)
+                .aspectRatio(previewAspectRatio)
+                .fillMaxWidth()
+                .clipToBounds()
+        )
+        CameraDetectionOverlay(
+            corners = liveCorners,
             modifier = Modifier
                 .align(Alignment.Center)
                 .aspectRatio(previewAspectRatio)
@@ -232,6 +272,21 @@ private fun CameraPreview(
                 if (takingPicture || busy) CircularProgressIndicator(modifier = Modifier.padding(8.dp))
             }
         }
+    }
+}
+
+@Composable
+private fun CameraDetectionOverlay(corners: List<Offset>?, modifier: Modifier = Modifier) {
+    val outline = MaterialTheme.colorScheme.tertiary
+    Canvas(modifier = modifier.semantics { contentDescription = "書類検出枠" }) {
+        if (corners?.size != 4) return@Canvas
+        val path = Path().apply {
+            moveTo(corners[0].x, corners[0].y)
+            corners.drop(1).forEach { lineTo(it.x, it.y) }
+            close()
+        }
+        drawPath(path, color = outline.copy(alpha = 0.16f))
+        drawPath(path, color = outline, style = Stroke(width = 3.dp.toPx()))
     }
 }
 

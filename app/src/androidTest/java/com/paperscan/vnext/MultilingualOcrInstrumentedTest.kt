@@ -17,6 +17,7 @@ import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.paperscan.model.OcrStatus
+import com.paperscan.model.OcrLanguage
 import com.paperscan.ocr.MlKitOcrService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -28,6 +29,44 @@ import java.util.concurrent.TimeUnit
 /** Small, synthetic technical proof; it does not use personal document images. */
 @RunWith(AndroidJUnit4::class)
 class MultilingualOcrInstrumentedTest {
+    @Test
+    fun simplifiedChineseRegression_TC_OCR_016_keepsFullGroundTruthAndMeasuresCer() = runBlocking(Dispatchers.IO) {
+        val expected = "简体中文测试"
+        val bitmap = textImage(expected)
+        try {
+            val actual = MlKitOcrService().recognize(bitmap, "simplified-cer", 1, OcrLanguage.CHINESE)
+                .text.filterNot(Char::isWhitespace)
+            val cer = editDistance(expected, actual).toDouble() / expected.length
+
+            Log.i("PaperScanOcrMetric", "language=Chinese-Simplified expected=$expected actual=$actual CER=$cer")
+            assertTrue("keep the complete six-character fixture and do not regress beyond the recorded 0.50 CER; actual='$actual'", cer <= 0.50)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    @Test
+    fun manualLanguage_TC_OCR_015_runsOnlySelectedRecognizerForEachScript() = runBlocking(Dispatchers.IO) {
+        val cases = listOf(
+            OcrLanguage.LATIN to ("PaperScan" to "PaperScan"),
+            OcrLanguage.CHINESE to ("简体中文测试" to "文"),
+            OcrLanguage.JAPANESE to ("日本語テスト" to "日本"),
+            OcrLanguage.KOREAN to ("한국어" to "한국")
+        )
+
+        cases.forEach { (language, textCase) ->
+            val (source, expectedToken) = textCase
+            val bitmap = textImage(source)
+            try {
+                val result = MlKitOcrService().recognize(bitmap, "manual-${language.name}", 1, language)
+                assertTrue("${language.name} must return its selected engine", result.engine.endsWith(language.name))
+                assertTrue("${language.name} must recognize '$expectedToken'; result='${result.text}'", result.text.contains(expectedToken))
+            } finally {
+                bitmap.recycle()
+            }
+        }
+    }
+
     @Test
     fun bundledMlKitRecognizers_readRequiredScriptsAndReturnTextBounds() = runBlocking(Dispatchers.IO) {
         val cases = listOf(
@@ -131,5 +170,22 @@ class MultilingualOcrInstrumentedTest {
         val expectedToken: String,
         val createRecognizer: () -> TextRecognizer
     )
+
+    private fun editDistance(expected: String, actual: String): Int {
+        var previous = IntArray(actual.length + 1) { it }
+        expected.forEachIndexed { expectedIndex, expectedChar ->
+            val current = IntArray(actual.length + 1)
+            current[0] = expectedIndex + 1
+            actual.forEachIndexed { actualIndex, actualChar ->
+                current[actualIndex + 1] = minOf(
+                    current[actualIndex] + 1,
+                    previous[actualIndex + 1] + 1,
+                    previous[actualIndex] + if (expectedChar == actualChar) 0 else 1
+                )
+            }
+            previous = current
+        }
+        return previous.last()
+    }
 
 }

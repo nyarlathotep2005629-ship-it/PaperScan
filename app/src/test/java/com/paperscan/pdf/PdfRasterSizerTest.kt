@@ -5,6 +5,43 @@ import org.junit.Test
 
 class PdfRasterSizerTest {
     @Test
+    fun raster_TC_PDF_007_invalidLogicalPageSizeIsRejected() {
+        expectIllegalArgument {
+            PdfRasterSizer.sizeFor(PdfPageSize(0, 842), 1000, 1000)
+        }
+    }
+
+    @Test
+    fun raster_TC_PDF_008_extremeDpiDoesNotOverflowAndDoesNotUpscaleSource() {
+        assertEquals(
+            PdfRasterSize(300, 424),
+            PdfRasterSizer.sizeFor(PdfPageSize(595, 842), 300, 424, Int.MAX_VALUE)
+        )
+    }
+
+    @Test
+    fun raster_TC_PDF_009_zeroTargetDpiIsRejected() {
+        expectIllegalArgument {
+            PdfRasterSizer.sizeFor(PdfPageSize(595, 842), 1000, 1000, targetDpi = 0)
+        }
+    }
+
+    @Test
+    fun raster_TC_PDF_010_zeroSourceHeightIsRejected() {
+        expectIllegalArgument {
+            PdfRasterSizer.sizeFor(PdfPageSize(595, 842), 1000, 0)
+        }
+    }
+
+    @Test
+    fun raster_TC_PDF_011_tinyLogicalPageStillReturnsAtLeastOnePixel() {
+        assertEquals(
+            PdfRasterSize(1, 1),
+            PdfRasterSizer.sizeFor(PdfPageSize(1, 1), 1000, 1000, targetDpi = 1)
+        )
+    }
+
+    @Test
     fun a4At200Dpi_isBoundedToReadableRaster() {
         val actual = PdfRasterSizer.sizeFor(PdfPageSize(595, 842), 3000, 4242)
 
@@ -34,5 +71,12 @@ class PdfRasterSizerTest {
 
         assertEquals(PdfRasterSize(992, 1403), largeSource)
         assertEquals(PdfRasterSize(300, 424), smallSource)
+    }
+
+    private fun expectIllegalArgument(block: () -> Unit) {
+        try {
+            block()
+            throw AssertionError("invalid dimensions must be rejected")
+        } catch (_: IllegalArgumentException) { }
     }
 }

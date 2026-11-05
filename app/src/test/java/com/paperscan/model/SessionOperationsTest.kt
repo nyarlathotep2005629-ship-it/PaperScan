@@ -7,6 +7,135 @@ import org.junit.Test
 
 class SessionOperationsTest {
     @Test
+    fun applyScanMode_TC_SESSION_008_multiPageSelectionChangesOnlyRequestedPagesInPlace() {
+        val original = session("A", "B", "C")
+        val updated = requireNotNull(SessionOperations.applyScanMode(original, setOf("A", "C"), ScanMode.COLOR, now = 20))
+
+        assertEquals(listOf("A", "B", "C"), updated.pages.map(PageItem::id))
+        assertEquals(listOf(ScanMode.COLOR, ScanMode.AUTO, ScanMode.COLOR), updated.pages.map(PageItem::scanMode))
+        assertEquals(original.pages[1], updated.pages[1])
+    }
+
+    @Test
+    fun applyScanMode_TC_SESSION_009_unknownOnlySelectionDoesNotChangeSession() {
+        val original = session("A", "B")
+
+        assertNull(SessionOperations.applyScanMode(original, setOf("unknown"), ScanMode.TEXT, now = 21))
+        assertEquals(listOf(ScanMode.AUTO, ScanMode.AUTO), original.pages.map(PageItem::scanMode))
+    }
+
+    @Test
+    fun applyScanMode_TC_SESSION_010_emptySelectionDoesNotChangeSession() {
+        val original = session("A")
+
+        assertNull(SessionOperations.applyScanMode(original, emptySet(), ScanMode.TEXT, now = 22))
+        assertEquals(0, original.updatedAtEpochMillis)
+    }
+
+    @Test
+    fun movePage_TC_SESSION_011_firstPageCanMoveToLastPosition() {
+        val original = session("A", "B", "C")
+
+        val updated = requireNotNull(SessionOperations.movePage(original, 0, 2, now = 23))
+
+        assertEquals(listOf("B", "C", "A"), updated.pages.map(PageItem::id))
+        assertEquals(23, updated.updatedAtEpochMillis)
+    }
+
+    @Test
+    fun movePage_TC_SESSION_012_negativeSourceIndexIsRejected() {
+        assertNull(SessionOperations.movePage(session("A", "B"), -1, 0, now = 24))
+    }
+
+    @Test
+    fun deletePage_TC_SESSION_013_deletingSelectedFirstPageSelectsFollowingPage() {
+        val original = session("A", "B", "C", selected = "A")
+
+        val updated = requireNotNull(SessionOperations.deletePage(original, "A", now = 25))
+
+        assertEquals(listOf("B", "C"), updated.pages.map(PageItem::id))
+        assertEquals("B", updated.selectedPageId)
+    }
+
+    @Test
+    fun appendPage_TC_SESSION_014_existingSelectionIsRetainedWhenAppending() {
+        val original = session("A", "B", selected = "B")
+        val updated = SessionOperations.appendPage(original, originalPage("C"), now = 26)
+
+        assertEquals(listOf("A", "B", "C"), updated.pages.map(PageItem::id))
+        assertEquals("B", updated.selectedPageId)
+        assertEquals(listOf("A", "B"), original.pages.map(PageItem::id))
+    }
+
+    @Test
+    fun appendPage_TC_SESSION_001_emptySessionSelectsFirstPageAndUpdatesTimestamp() {
+        val original = session(selected = null)
+        val page = originalPage("new")
+
+        val updated = SessionOperations.appendPage(original, page, now = 42)
+
+        assertEquals(listOf("new"), updated.pages.map(PageItem::id))
+        assertEquals("new", updated.selectedPageId)
+        assertEquals(42, updated.updatedAtEpochMillis)
+        assertEquals(emptyList<String>(), original.pages.map(PageItem::id))
+    }
+
+    @Test
+    fun deletePage_TC_SESSION_002_deletingUnselectedPagePreservesSelection() {
+        val original = session("A", "B", "C", selected = "B")
+
+        val updated = requireNotNull(SessionOperations.deletePage(original, "A", now = 8))
+
+        assertEquals(listOf("B", "C"), updated.pages.map(PageItem::id))
+        assertEquals("B", updated.selectedPageId)
+    }
+
+    @Test
+    fun deletePage_TC_SESSION_003_deletingSelectedLastPageSelectsPreviousPage() {
+        val original = session("A", "B", "C", selected = "C")
+
+        val updated = requireNotNull(SessionOperations.deletePage(original, "C", now = 9))
+
+        assertEquals(listOf("A", "B"), updated.pages.map(PageItem::id))
+        assertEquals("B", updated.selectedPageId)
+    }
+
+    @Test
+    fun deletePage_TC_SESSION_004_unknownPageIsNoOpAndLeavesOriginalUntouched() {
+        val original = session("A", "B", selected = "B")
+
+        assertNull(SessionOperations.deletePage(original, "missing", now = 10))
+        assertEquals(listOf("A", "B"), original.pages.map(PageItem::id))
+        assertEquals(0, original.updatedAtEpochMillis)
+    }
+
+    @Test
+    fun movePage_TC_SESSION_005_outOfRangeDestinationIsNoOp() {
+        val original = session("A", "B")
+
+        assertNull(SessionOperations.movePage(original, 0, 2, now = 11))
+        assertEquals(listOf("A", "B"), original.pages.map(PageItem::id))
+    }
+
+    @Test
+    fun movePage_TC_SESSION_006_sameIndexDoesNotCreateSessionUpdate() {
+        val original = session("A", "B")
+
+        assertNull(SessionOperations.movePage(original, 1, 1, now = 12))
+        assertEquals(0, original.updatedAtEpochMillis)
+    }
+
+    @Test
+    fun movePage_TC_SESSION_007_reorderingPreservesSelectedPageIdentity() {
+        val original = session("A", "B", "C", selected = "B")
+
+        val updated = requireNotNull(SessionOperations.movePage(original, 1, 0, now = 13))
+
+        assertEquals(listOf("B", "A", "C"), updated.pages.map(PageItem::id))
+        assertEquals("B", updated.selectedPageId)
+    }
+
+    @Test
     fun appendPage_cameraPage_keepsExistingPagesAndAppendsAtEnd() {
         val session = session("A", "B", selected = "A")
         val cameraPage = PageItem(
@@ -122,5 +251,18 @@ class SessionOperationsTest {
             )
         },
         selectedPageId = selected
+    )
+
+    private fun originalPage(id: String) = PageItem(
+        id = id,
+        sourceType = SourceType.CAMERA,
+        sourceUri = null,
+        workingRelativePath = "captures/$id.jpg",
+        thumbnailRelativePath = null,
+        sourceExifRotationDegrees = 0,
+        sourceExifFlipped = false,
+        rotationQuarterTurns = 0,
+        scanMode = ScanMode.AUTO,
+        status = PageStatus.NEEDS_REVIEW
     )
 }

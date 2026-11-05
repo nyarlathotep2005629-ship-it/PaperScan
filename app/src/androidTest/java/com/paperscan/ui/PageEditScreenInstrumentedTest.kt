@@ -6,11 +6,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import com.paperscan.model.CornerEditDraft
 import com.paperscan.model.CornerPoints
 import com.paperscan.model.PageItem
+import com.paperscan.model.OcrLanguage
 import com.paperscan.model.PageStatus
 import com.paperscan.model.ScanMode
 import com.paperscan.model.SourceType
@@ -57,6 +59,7 @@ class PageEditScreenInstrumentedTest {
                     onCornerChanged = { index, point -> draft.value = draft.value.moveCorner(index, point) },
                     onSaveCorners = { saved = draft.value.cornersToCommit() },
                     onScanModeChanged = {},
+                    onOcrLanguageChanged = {},
                     onRotate = {},
                     onRedetect = {},
                     onRecognize = {},
@@ -82,4 +85,44 @@ class PageEditScreenInstrumentedTest {
         assertEquals(0.20f, committed.topLeft.x, 0.04f)
         assertEquals(0.18f, committed.topLeft.y, 0.04f)
     }
+
+    @Test
+    fun ocrLanguage_TC_UI_001_selectingLanguageUpdatesPageAndKeepsActionWired() {
+        val pageState = mutableStateOf(page("language-setting"))
+        composeRule.setContent {
+            MaterialTheme {
+                PageEditScreen(
+                    page = pageState.value,
+                    state = PageEditUiState(pageId = pageState.value.id, cornerDraft = CornerEditDraft.manualFallback()),
+                    busy = false,
+                    onCornerChanged = { _, _ -> },
+                    onSaveCorners = {},
+                    onScanModeChanged = {},
+                    onOcrLanguageChanged = { language -> pageState.value = pageState.value.copy(ocrLanguage = language) },
+                    onRotate = {},
+                    onRedetect = {},
+                    onRecognize = {},
+                    onBack = {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("ocr_language_selector").performClick()
+        composeRule.onNodeWithText("日本語").performClick()
+
+        assertEquals(OcrLanguage.JAPANESE, pageState.value.ocrLanguage)
+    }
+
+    private fun page(id: String) = PageItem(
+        id = id,
+        sourceType = SourceType.IMPORT,
+        sourceUri = "content://fixture/$id",
+        workingRelativePath = null,
+        thumbnailRelativePath = null,
+        sourceExifRotationDegrees = 0,
+        sourceExifFlipped = false,
+        rotationQuarterTurns = 0,
+        scanMode = ScanMode.AUTO,
+        status = PageStatus.READY
+    )
 }

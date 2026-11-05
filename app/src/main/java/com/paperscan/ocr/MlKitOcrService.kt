@@ -12,6 +12,7 @@ import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.paperscan.model.NormalizedTextBounds
 import com.paperscan.model.OcrTextLine
+import com.paperscan.model.OcrLanguage
 import com.paperscan.model.PageOcrResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -19,16 +20,26 @@ import java.util.concurrent.TimeUnit
 
 /** On-device OCR over the corrected page image; it does not make network calls. */
 class MlKitOcrService {
-    suspend fun recognize(bitmap: Bitmap, revision: String, nowEpochMillis: Long): PageOcrResult =
+    suspend fun recognize(
+        bitmap: Bitmap,
+        revision: String,
+        nowEpochMillis: Long,
+        language: OcrLanguage = OcrLanguage.AUTO
+    ): PageOcrResult =
         withContext(Dispatchers.IO) {
             require(!bitmap.isRecycled)
             val input = InputImage.fromBitmap(bitmap, 0)
-            val engines = listOf(
-                { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) },
-                { TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build()) },
-                { TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build()) },
-                { TextRecognition.getClient(KoreanTextRecognizerOptions.Builder().build()) }
-            )
+            val latin = { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
+            val chinese = { TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build()) }
+            val japanese = { TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build()) }
+            val korean = { TextRecognition.getClient(KoreanTextRecognizerOptions.Builder().build()) }
+            val engines = when (language) {
+                OcrLanguage.AUTO -> listOf(latin, chinese, japanese, korean)
+                OcrLanguage.LATIN -> listOf(latin)
+                OcrLanguage.CHINESE -> listOf(chinese)
+                OcrLanguage.JAPANESE -> listOf(japanese)
+                OcrLanguage.KOREAN -> listOf(korean)
+            }
             val lines = mutableListOf<OcrCandidate>()
             engines.forEach { createRecognizer ->
                 val recognizer = createRecognizer()
@@ -55,6 +66,7 @@ class MlKitOcrService {
                 revision = revision,
                 status = if (ordered.isEmpty()) com.paperscan.model.OcrStatus.FAILED else com.paperscan.model.OcrStatus.COMPLETE,
                 lines = ordered,
+                engine = "${PageOcrResult.ENGINE_VERSION} / ${language.name}",
                 updatedAtEpochMillis = nowEpochMillis
             )
         }

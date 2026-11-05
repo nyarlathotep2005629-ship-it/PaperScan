@@ -19,3 +19,8 @@ interface DocumentProcessor {
     suspend fun createCorrectedPreview(page: PageItem): Bitmap
     suspend fun processForExport(page: PageItem): Bitmap
 }
+
+/** Synchronous, bounded-work detector used only by the CameraX analysis executor. */
+fun interface CameraFrameDocumentDetector {
+    fun detect(bitmap: Bitmap): DetectionResult
+}

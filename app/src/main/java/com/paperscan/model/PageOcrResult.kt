@@ -42,6 +42,7 @@ fun PageItem.ocrRevision(): String {
         append(workingRelativePath ?: sourceUri.orEmpty()).append('|')
         append(sourceExifRotationDegrees).append('|').append(sourceExifFlipped).append('|')
         append(rotationQuarterTurns).append('|').append(scanMode.name).append('|')
+        append(ocrLanguage.name).append('|')
         corners?.points?.forEach { point -> append(point.x).append(',').append(point.y).append(';') }
     }
     return MessageDigest.getInstance("SHA-256").digest(fields.toByteArray(Charsets.UTF_8))

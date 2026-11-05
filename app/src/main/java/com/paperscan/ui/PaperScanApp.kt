@@ -126,6 +126,7 @@ fun PaperScanApp(viewModel: ScanSessionViewModel) {
                         onCornerChanged = { index, point -> viewModel.updateEditorCorner(page.id, index, point) },
                         onSaveCorners = { viewModel.saveCorners(page.id) },
                         onScanModeChanged = { viewModel.updateScanMode(page.id, it) },
+                        onOcrLanguageChanged = { viewModel.updateOcrLanguage(page.id, it) },
                         onRotate = { viewModel.rotatePageClockwise(page.id) },
                         onRedetect = { viewModel.redetectPage(page.id) },
                         onRecognize = { viewModel.recognizePage(page.id) },

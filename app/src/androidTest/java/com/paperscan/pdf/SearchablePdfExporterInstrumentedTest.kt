@@ -35,6 +35,63 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class SearchablePdfExporterInstrumentedTest {
     @Test
+    fun export_TC_PDF_007_longCjkAndSupplementaryTextRoundTripsAcrossPages() = kotlinx.coroutines.runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        PDFBoxResourceLoader.init(object : ContextWrapper(context) {
+            override fun getApplicationContext(): Context = instrumentation.context
+        })
+        val files = WorkingFileStore.forIsolatedTest(context)
+        val firstText = "頁一 😀 " + "文".repeat(110)
+        val secondText = "二ページ 한국어"
+        val first = searchablePage("unicode-first", firstText)
+        val second = searchablePage("unicode-second", secondText)
+        val failed = searchablePage("ocr-failed", text = null).copy(
+            ocrResult = PageOcrResult(
+                revision = "failed-revision",
+                status = OcrStatus.FAILED,
+                lines = emptyList(),
+                updatedAtEpochMillis = 1
+            )
+        )
+        val processor = object : DocumentProcessor {
+            override suspend fun detect(page: PageItem): DetectionResult = error("Not used")
+            override suspend fun loadOriginalPreview(page: PageItem): Bitmap = error("Not used")
+            override suspend fun createCorrectedPreview(page: PageItem): Bitmap = error("Not used")
+            override suspend fun processForExport(page: PageItem): Bitmap =
+                Bitmap.createBitmap(595, 842, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+        }
+        val session = ScanSession(
+            id = "pdf-unicode-pages",
+            createdAtEpochMillis = 0,
+            updatedAtEpochMillis = 0,
+            pages = listOf(first, second, failed),
+            selectedPageId = first.id
+        )
+
+        val result = PdfExporter(processor, files).export(session, includeSearchableText = true) { _, _ -> }
+        assertTrue(result is ExportResult.Success)
+        val output = (result as ExportResult.Success).tempFile
+        try {
+            val raw = output.readBytes().toString(Charsets.ISO_8859_1)
+            assertTrue(raw.startsWith("%PDF-1.4"))
+            assertTrue(raw.contains("xref\n"))
+            assertTrue(raw.contains("trailer\n"))
+            PDDocument.load(output).use { document ->
+                assertEquals(3, document.numberOfPages)
+                val extracted = PDFTextStripper().getText(document)
+                assertTrue("long CJK text and surrogate-pair Unicode must retain ToUnicode mapping", extracted.contains(firstText))
+                assertTrue(extracted.contains(secondText))
+                assertTrue(extracted.indexOf(firstText) < extracted.indexOf(secondText))
+                assertFalse("failed OCR page must not create searchable text", extracted.contains("ocr-failed"))
+            }
+        } finally {
+            output.delete()
+            files.cleanupStaleCache()
+        }
+    }
+
+    @Test
     fun export_cjkTextLayer_hasToUnicodeAndStaysInvisible() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -104,5 +161,26 @@ class SearchablePdfExporterInstrumentedTest {
         }
         output.delete()
         files.cleanupStaleCache()
+    }
+
+    private fun searchablePage(id: String, text: String?): PageItem {
+        val base = PageItem(
+            id = id,
+            sourceType = SourceType.IMPORT,
+            sourceUri = null,
+            workingRelativePath = null,
+            thumbnailRelativePath = null,
+            sourceExifRotationDegrees = 0,
+            sourceExifFlipped = false,
+            rotationQuarterTurns = 0,
+            scanMode = ScanMode.COLOR,
+            status = PageStatus.READY
+        )
+        return if (text == null) base else base.copy(ocrResult = PageOcrResult(
+            revision = base.ocrRevision(),
+            status = OcrStatus.COMPLETE,
+            lines = listOf(OcrTextLine(text, NormalizedTextBounds(0.05f, 0.08f, 0.9f, 0.13f))),
+            updatedAtEpochMillis = 1
+        ))
     }
 }

@@ -44,8 +44,9 @@ data class CornerPoints(
             val c = points[(index + 2) % points.size]
             (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
         }
-        return crossProducts.all { it > MINIMUM_CROSS_PRODUCT } ||
-            crossProducts.all { it < -MINIMUM_CROSS_PRODUCT }
+        // CornerPoints is always TL, TR, BR, BL in image coordinates (y points down).
+        // Reversed winding can produce a convex polygon but would invert the perspective map.
+        return crossProducts.all { it > MINIMUM_CROSS_PRODUCT }
     }
 
     /** Maps this quad into the coordinate system of an image rotated 90 degrees clockwise. */
@@ -122,10 +123,12 @@ object PerspectiveSizing {
     fun outputSize(corners: List<PixelPoint>, maxLongEdgePx: Int = DEFAULT_MAX_LONG_EDGE_PX): ImageSize {
         require(corners.size == 4)
         require(maxLongEdgePx > 0)
+        require(corners.all { it.x.isFinite() && it.y.isFinite() })
         val top = distance(corners[0], corners[1])
         val bottom = distance(corners[3], corners[2])
         val left = distance(corners[0], corners[3])
         val right = distance(corners[1], corners[2])
+        require(listOf(top, bottom, left, right).all { it.isFinite() && it > 0f })
         val unboundedWidth = maxOf(top, bottom).coerceAtLeast(1f)
         val unboundedHeight = maxOf(left, right).coerceAtLeast(1f)
         val scale = minOf(1f, maxLongEdgePx.toFloat() / maxOf(unboundedWidth, unboundedHeight))

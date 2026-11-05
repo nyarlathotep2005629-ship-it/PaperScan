@@ -22,9 +22,49 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.FileOutputStream
+import android.util.Log
+import org.json.JSONObject
+import org.opencv.core.Core
+import org.opencv.core.CvType
+import org.opencv.core.Mat
+import org.opencv.core.MatOfPoint
+import org.opencv.core.Point
+import org.opencv.core.Scalar
+import org.opencv.imgproc.Imgproc
 
 @RunWith(AndroidJUnit4::class)
 class OpenCvDocumentProcessorInstrumentedTest {
+    @Test
+    fun detectGroundTruth_TC_DET_001_measuresIndependentSyntheticCornerErrorAndIoU() {
+        val context = InstrumentationRegistry.getInstrumentation().context
+        val dataset = context.assets.open("fixtures/detection_ground_truth.json").bufferedReader().use { reader ->
+            JSONObject(reader.readText())
+        }
+        val truth = dataset.getJSONArray("fixtures").getJSONObject(0)
+        val datasetId = dataset.getString("datasetId")
+        val bitmap = fixture(truth.getString("file"))
+        try {
+            assertEquals(truth.getInt("width"), bitmap.width)
+            assertEquals(truth.getInt("height"), bitmap.height)
+            val truthArray = truth.getJSONArray("corners")
+            val expected = List(4) { index ->
+                val point = truthArray.getJSONArray(index)
+                NormalizedPoint(point.getDouble(0).toFloat(), point.getDouble(1).toFloat())
+            }
+            val actual = requireNotNull(processor().detectBitmap(bitmap).corners)
+            val meanCornerErrorPx = expected.zip(actual.points).map { (a, b) ->
+                kotlin.math.hypot(((a.x - b.x) * bitmap.width).toDouble(), ((a.y - b.y) * bitmap.height).toDouble())
+            }.average()
+            val iou = polygonIou(expected, actual.points, bitmap.width, bitmap.height)
+
+            Log.i("PaperScanDetectionMetric", "dataset=$datasetId fixture=${truth.getString("file")} meanCornerErrorPx=$meanCornerErrorPx iou=$iou")
+            assertTrue("independently annotated paper should reach baseline IoU >= 0.80; measured $iou", iou >= 0.80)
+            assertTrue("mean corner error must stay below 5% of the long edge; measured $meanCornerErrorPx", meanCornerErrorPx < bitmap.width * 0.05)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
     @Test
     fun detectBitmap_perspectivePaperFixture_returnsUsableCorners() {
         val processor = processor()
@@ -248,5 +288,36 @@ class OpenCvDocumentProcessorInstrumentedTest {
             }
         }
         return count >= 3
+    }
+
+    private fun polygonIou(
+        expected: List<NormalizedPoint>,
+        actual: List<NormalizedPoint>,
+        width: Int,
+        height: Int
+    ): Double {
+        fun polygon(points: List<NormalizedPoint>): MatOfPoint = MatOfPoint(
+            *points.map { point -> Point(point.x.toDouble() * (width - 1), point.y.toDouble() * (height - 1)) }.toTypedArray()
+        )
+        val expectedPolygon = polygon(expected)
+        val actualPolygon = polygon(actual)
+        val expectedMask = Mat.zeros(height, width, CvType.CV_8UC1)
+        val actualMask = Mat.zeros(height, width, CvType.CV_8UC1)
+        val intersection = Mat()
+        val union = Mat()
+        try {
+            Imgproc.fillPoly(expectedMask, listOf(expectedPolygon), Scalar(255.0))
+            Imgproc.fillPoly(actualMask, listOf(actualPolygon), Scalar(255.0))
+            Core.bitwise_and(expectedMask, actualMask, intersection)
+            Core.bitwise_or(expectedMask, actualMask, union)
+            return Core.countNonZero(intersection).toDouble() / Core.countNonZero(union).coerceAtLeast(1)
+        } finally {
+            union.release()
+            intersection.release()
+            actualMask.release()
+            expectedMask.release()
+            actualPolygon.release()
+            expectedPolygon.release()
+        }
     }
 }

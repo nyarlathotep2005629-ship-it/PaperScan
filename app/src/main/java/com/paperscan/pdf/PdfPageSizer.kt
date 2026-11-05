@@ -47,7 +47,7 @@ object PdfPageSizer {
         }
 
         val useLandscape = when (orientation) {
-            PdfOrientation.AUTO -> automatic.widthPoints > automatic.heightPoints
+            PdfOrientation.AUTO -> ratio > 1f
             PdfOrientation.PORTRAIT -> false
             PdfOrientation.LANDSCAPE -> true
         }
@@ -61,6 +61,7 @@ object PdfPageSizer {
     }
 
     fun fitRect(pageSize: PdfPageSize, imageWidthPx: Int, imageHeightPx: Int): PdfDrawRect {
+        require(pageSize.widthPoints > 0 && pageSize.heightPoints > 0) { "PDFページ寸法が不正です。" }
         require(imageWidthPx > 0 && imageHeightPx > 0) { "画像寸法が不正です。" }
         val scale = min(
             pageSize.widthPoints.toFloat() / imageWidthPx,

@@ -7,6 +7,31 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CornerEditDraftTest {
+    @Test
+    fun editDraft_TC_EDIT_006_invalidCornerIndexLeavesDraftUnchanged() {
+        val original = CornerEditDraft.fromSaved(saved)
+
+        assertEquals(original, original.moveCorner(4, NormalizedPoint(0.2f, 0.2f)))
+    }
+
+    @Test
+    fun editDraft_TC_EDIT_007_outOfBoundsDragLeavesDraftUnchanged() {
+        val original = CornerEditDraft.fromSaved(saved)
+
+        assertEquals(original, original.moveCorner(0, NormalizedPoint(1.01f, 0.2f)))
+    }
+
+    @Test
+    fun editDraft_TC_EDIT_008_rotationKeepsSavedAndEditableCornersInSync() {
+        val original = CornerEditDraft.fromSaved(saved)
+
+        val rotated = requireNotNull(original.rotateClockwise())
+
+        assertEquals(requireNotNull(saved.rotateClockwise()), rotated.savedCorners)
+        assertEquals(rotated.editableCorners, rotated.savedCorners)
+        assertFalse(rotated.hasUnsavedChanges)
+    }
+
     private val saved = CornerPoints(
         NormalizedPoint(0.10f, 0.10f), NormalizedPoint(0.90f, 0.10f),
         NormalizedPoint(0.90f, 0.90f), NormalizedPoint(0.10f, 0.90f)

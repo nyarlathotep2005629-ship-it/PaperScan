@@ -21,12 +21,15 @@ import com.paperscan.model.PageOcrResult
 import com.paperscan.model.OcrStatus
 import com.paperscan.model.ocrRevision
 import com.paperscan.model.ScanMode
+import com.paperscan.model.OcrLanguage
 import com.paperscan.model.SourceType
 import com.paperscan.pdf.ExportResult
 import com.paperscan.pdf.PdfExporter
 import com.paperscan.pdf.PdfExportSettings
 import com.paperscan.ocr.MlKitOcrService
 import com.paperscan.processing.DocumentProcessor
+import com.paperscan.processing.CameraFrameDocumentDetector
+import com.paperscan.processing.DetectionResult
 import com.paperscan.storage.SessionStore
 import com.paperscan.storage.WorkingFileStore
 import kotlinx.coroutines.Dispatchers
@@ -97,6 +100,11 @@ class ScanSessionViewModel(
     private var tempPdfSearchable = false
     private var editorLoadGeneration = 0L
     private val ocrJobs = mutableMapOf<String, Job>()
+
+    /** Called only from CameraX's single background analysis executor. */
+    fun detectCameraFrame(bitmap: android.graphics.Bitmap): DetectionResult =
+        (documentProcessor as? CameraFrameDocumentDetector)?.detect(bitmap)
+            ?: DetectionResult(null, DetectionConfidence.LOW, previewWidth = bitmap.width, previewHeight = bitmap.height)
 
     fun initialize() = viewModelScope.launch {
         workingFileStore.cleanupStaleCache()
@@ -375,6 +383,10 @@ class ScanSessionViewModel(
             draftOverride = _pageEditUiState.value.cornerDraft,
             recognizeAfter = true
         ) { page -> page.copy(scanMode = mode) }
+    }
+
+    fun updateOcrLanguage(pageId: String, language: OcrLanguage) {
+        updatePage(pageId, recognizeAfter = true) { page -> page.copy(ocrLanguage = language) }
     }
 
     fun recognizePage(pageId: String) {
@@ -658,7 +670,7 @@ class ScanSessionViewModel(
     private suspend fun recognizePageContent(page: PageItem): PageOcrResult {
         val bitmap = withContext(Dispatchers.IO) { documentProcessor.processForExport(page) }
         return try {
-            ocrService.recognize(bitmap, page.ocrRevision(), now())
+            ocrService.recognize(bitmap, page.ocrRevision(), now(), page.ocrLanguage)
         } finally {
             bitmap.recycle()
         }

@@ -29,7 +29,7 @@ import kotlin.math.sqrt
 /** OpenCV-only implementation. All callers receive EXIF- and user-rotation-corrected bitmaps. */
 class OpenCvDocumentProcessor(
     private val imageLoader: SourceImageLoader
-) : DocumentProcessor {
+) : DocumentProcessor, CameraFrameDocumentDetector {
     override suspend fun detect(page: PageItem): DetectionResult = withContext(Dispatchers.Default) {
         val preview = imageLoader.decodePreview(page, DETECTION_LONG_EDGE_PX)
         try {
@@ -101,6 +101,8 @@ class OpenCvDocumentProcessor(
             rgba.release()
         }
     }
+
+    override fun detect(bitmap: Bitmap): DetectionResult = detectBitmap(bitmap)
 
     private fun process(source: Bitmap, page: PageItem): Bitmap {
         ensureInitialized()
