@@ -2,6 +2,7 @@ package com.paperscan.processing
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.paperscan.image.SourceImageLoader
@@ -15,6 +16,7 @@ import com.paperscan.model.SourceType
 import com.paperscan.storage.WorkingFileStore
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -54,9 +56,50 @@ class OpenCvDocumentProcessorInstrumentedTest {
     }
 
     @Test
+    fun detectBitmap_representativeDocuments_returnValidCandidates() {
+        val processor = processor()
+        listOf("overhead_a4.png", "perspective_a4.png", "white_table.png", "wood_table.png", "shadow.png")
+            .forEach { name ->
+                val bitmap = fixture(name)
+                try {
+                    val result = processor.detectBitmap(bitmap)
+                    assertNotNull("$name must produce a candidate", result.corners)
+                    assertTrue("$name candidate must be valid", requireNotNull(result.corners).isValid())
+                } finally {
+                    bitmap.recycle()
+                }
+            }
+    }
+
+    @Test
+    fun detectBitmap_rotatedDocument_returnsCoordinatesInRotatedBitmapSpace() {
+        val source = fixture("perspective_a4.png")
+        val rotated = Bitmap.createBitmap(
+            source,
+            0,
+            0,
+            source.width,
+            source.height,
+            Matrix().apply { postRotate(90f) },
+            true
+        )
+        try {
+            val result = processor().detectBitmap(rotated)
+
+            assertNotNull(result.corners)
+            assertTrue(requireNotNull(result.corners).isValid())
+            assertEquals(rotated.width, result.previewWidth)
+            assertEquals(rotated.height, result.previewHeight)
+        } finally {
+            rotated.recycle()
+            if (!source.isRecycled) source.recycle()
+        }
+    }
+
+    @Test
     fun processForExport_manualCorners_appliesPerspectiveAndKeepsBoundedSize() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val files = WorkingFileStore(context)
+        val files = WorkingFileStore.forIsolatedTest(context)
         val pageId = "perspective-export"
         val source = files.fallbackImportFile(pageId, "png")
         val bitmap = fixture("perspective_a4.png")
@@ -82,21 +125,64 @@ class OpenCvDocumentProcessorInstrumentedTest {
             )
         )
 
-        val output = processor(files).processForExport(page)
+        val activeProcessor = processor(files)
+        val before = activeProcessor.processForExport(page.copy(corners = CornerPoints.fullImage()))
+        val output = activeProcessor.processForExport(page)
 
         try {
             assertTrue(maxOf(output.width, output.height) <= 3000)
             assertTrue(output.width > 300 && output.height > 400)
+            assertNotEquals("manual corners must change perspective output width", before.width, output.width)
         } finally {
+            before.recycle()
             output.recycle()
             source.delete()
         }
     }
 
     @Test
+    fun detect_largeSource_usesDownscaledWorkingBitmap() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val files = WorkingFileStore.forIsolatedTest(context)
+        val pageId = "large-detection"
+        val sourceFile = files.fallbackImportFile(pageId, "png")
+        val fixture = fixture("perspective_a4.png")
+        val large = Bitmap.createScaledBitmap(fixture, 4000, 3200, true)
+        try {
+            FileOutputStream(sourceFile).use { output ->
+                assertTrue(large.compress(Bitmap.CompressFormat.PNG, 100, output))
+            }
+        } finally {
+            large.recycle()
+            fixture.recycle()
+        }
+        val page = PageItem(
+            id = pageId,
+            sourceType = SourceType.IMPORT,
+            sourceUri = null,
+            workingRelativePath = files.relativeFallbackPath(sourceFile),
+            thumbnailRelativePath = null,
+            sourceExifRotationDegrees = 0,
+            sourceExifFlipped = false,
+            rotationQuarterTurns = 0,
+            scanMode = ScanMode.AUTO,
+            status = PageStatus.NEEDS_REVIEW
+        )
+
+        try {
+            val result = processor(files).detect(page)
+            assertTrue(result.previewWidth <= 1600)
+            assertTrue(result.previewHeight <= 1600)
+            assertNotNull(result.corners)
+        } finally {
+            sourceFile.delete()
+        }
+    }
+
+    @Test
     fun processForExport_allDeterministicFixturesAndModes_returnsDisplayableBitmap() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val files = WorkingFileStore(context)
+        val files = WorkingFileStore.forIsolatedTest(context)
         val names = listOf(
             "overhead_a4.png", "perspective_a4.png", "white_table.png", "wood_table.png",
             "dark_document.png", "shadow.png", "image_edge.png", "colored_document.png",
@@ -140,7 +226,7 @@ class OpenCvDocumentProcessorInstrumentedTest {
         }
     }
 
-    private fun processor(files: WorkingFileStore = WorkingFileStore(InstrumentationRegistry.getInstrumentation().targetContext)): OpenCvDocumentProcessor {
+    private fun processor(files: WorkingFileStore = WorkingFileStore.forIsolatedTest(InstrumentationRegistry.getInstrumentation().targetContext)): OpenCvDocumentProcessor {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         return OpenCvDocumentProcessor(SourceImageLoader(context, files))
     }

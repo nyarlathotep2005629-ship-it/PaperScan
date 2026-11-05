@@ -20,5 +20,6 @@ data class PageItem(
     val scanMode: ScanMode,
     val status: PageStatus,
     val corners: CornerPoints? = null,
-    val detectionConfidence: DetectionConfidence? = null
+    val detectionConfidence: DetectionConfidence? = null,
+    val ocrResult: PageOcrResult? = null
 )

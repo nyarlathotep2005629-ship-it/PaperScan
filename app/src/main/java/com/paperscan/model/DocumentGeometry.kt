@@ -5,7 +5,7 @@ import kotlin.math.hypot
 
 /** A point expressed in the EXIF- and user-rotation-corrected image coordinate system. */
 data class NormalizedPoint(val x: Float, val y: Float) {
-    fun isInsideUnitSquare(): Boolean = x in 0f..1f && y in 0f..1f
+    fun isInsideUnitSquare(): Boolean = x.isFinite() && y.isFinite() && x in 0f..1f && y in 0f..1f
 }
 
 /**
@@ -22,7 +22,7 @@ data class CornerPoints(
         get() = listOf(topLeft, topRight, bottomRight, bottomLeft)
 
     fun isValid(): Boolean = points.all(NormalizedPoint::isInsideUnitSquare) &&
-        isSimple() && area() >= MINIMUM_NORMALIZED_AREA &&
+        isSimple() && isConvex() && area() >= MINIMUM_NORMALIZED_AREA &&
         points.zipWithNextCircular().all { (first, second) -> distance(first, second) >= MINIMUM_EDGE_LENGTH }
 
     fun area(): Float = kotlin.math.abs(
@@ -37,6 +37,22 @@ data class CornerPoints(
         !segmentsIntersect(topLeft, topRight, bottomRight, bottomLeft) &&
             !segmentsIntersect(topRight, bottomRight, bottomLeft, topLeft)
 
+    fun isConvex(): Boolean {
+        val crossProducts = points.indices.map { index ->
+            val a = points[index]
+            val b = points[(index + 1) % points.size]
+            val c = points[(index + 2) % points.size]
+            (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
+        }
+        return crossProducts.all { it > MINIMUM_CROSS_PRODUCT } ||
+            crossProducts.all { it < -MINIMUM_CROSS_PRODUCT }
+    }
+
+    /** Maps this quad into the coordinate system of an image rotated 90 degrees clockwise. */
+    fun rotateClockwise(): CornerPoints? = fromUnordered(
+        points.map { point -> NormalizedPoint(1f - point.y, point.x) }
+    )
+
     fun toPixels(width: Int, height: Int): List<PixelPoint> {
         require(width > 1 && height > 1)
         return points.map { PixelPoint(it.x * (width - 1), it.y * (height - 1)) }
@@ -45,6 +61,7 @@ data class CornerPoints(
     companion object {
         const val MINIMUM_NORMALIZED_AREA = 0.01f
         const val MINIMUM_EDGE_LENGTH = 0.02f
+        private const val MINIMUM_CROSS_PRODUCT = 0.000001f
 
         fun fullImage() = CornerPoints(
             NormalizedPoint(0f, 0f),

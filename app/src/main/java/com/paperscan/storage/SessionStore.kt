@@ -8,6 +8,10 @@ import com.paperscan.model.SourceType
 import com.paperscan.model.CornerPoints
 import com.paperscan.model.DetectionConfidence
 import com.paperscan.model.NormalizedPoint
+import com.paperscan.model.NormalizedTextBounds
+import com.paperscan.model.OcrStatus
+import com.paperscan.model.OcrTextLine
+import com.paperscan.model.PageOcrResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -99,10 +103,10 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
     private fun parse(text: String): ScanSession {
         val root = JSONObject(text)
         val schemaVersion = root.getInt("schemaVersion")
-        require(schemaVersion == ScanSession.CURRENT_SCHEMA_VERSION) { "未対応のセッション形式です。" }
+        require(schemaVersion in 1..ScanSession.CURRENT_SCHEMA_VERSION) { "未対応のセッション形式です。" }
         val pages = root.getJSONArray("pages").toPageItems()
         return ScanSession(
-            schemaVersion = schemaVersion,
+            schemaVersion = ScanSession.CURRENT_SCHEMA_VERSION,
             id = root.getString("id"),
             createdAtEpochMillis = root.getLong("createdAtEpochMillis"),
             updatedAtEpochMillis = root.getLong("updatedAtEpochMillis"),
@@ -133,6 +137,25 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
             })
         }
         detectionConfidence?.let { put("detectionConfidence", it.name) }
+        ocrResult?.let { result ->
+            put("ocrResult", JSONObject().apply {
+                put("revision", result.revision)
+                put("status", result.status.name)
+                put("engine", result.engine)
+                put("updatedAtEpochMillis", result.updatedAtEpochMillis)
+                put("lines", JSONArray().apply {
+                    result.lines.forEach { line -> put(JSONObject().apply {
+                        put("text", line.text)
+                        put("bounds", JSONObject().apply {
+                            put("left", line.bounds.left)
+                            put("top", line.bounds.top)
+                            put("right", line.bounds.right)
+                            put("bottom", line.bounds.bottom)
+                        })
+                    }) }
+                })
+            })
+        }
     }
 
     private fun JSONArray.toPageItems(): List<PageItem> = List(length()) { index ->
@@ -151,7 +174,30 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
                 corners = json.optCorners(),
                 detectionConfidence = json.optString("detectionConfidence")
                     .takeIf { it.isNotBlank() }
-                    ?.let(DetectionConfidence::valueOf)
+                    ?.let(DetectionConfidence::valueOf),
+                ocrResult = json.optJSONObject("ocrResult")?.let { result ->
+                    PageOcrResult(
+                        revision = result.getString("revision"),
+                        status = OcrStatus.valueOf(result.getString("status")),
+                        engine = result.optString("engine", PageOcrResult.ENGINE_VERSION),
+                        updatedAtEpochMillis = result.optLong("updatedAtEpochMillis", 0),
+                        lines = result.optJSONArray("lines")?.let { lines ->
+                            List(lines.length()) { lineIndex ->
+                                val line = lines.getJSONObject(lineIndex)
+                                val bounds = line.getJSONObject("bounds")
+                                OcrTextLine(
+                                    text = line.getString("text"),
+                                    bounds = NormalizedTextBounds(
+                                        left = bounds.getDouble("left").toFloat(),
+                                        top = bounds.getDouble("top").toFloat(),
+                                        right = bounds.getDouble("right").toFloat(),
+                                        bottom = bounds.getDouble("bottom").toFloat()
+                                    )
+                                )
+                            }
+                        } ?: emptyList()
+                    )
+                }
             )
         }
     }

@@ -1,7 +1,10 @@
 package com.paperscan.ui
 
 import android.graphics.Bitmap
+import android.content.ClipData
+import android.content.ClipboardManager
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,15 +18,16 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -33,26 +37,34 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.paperscan.model.CornerPoints
+import com.paperscan.model.DisplayPoint
+import com.paperscan.model.DisplayedImageBounds
 import com.paperscan.model.NormalizedPoint
 import com.paperscan.model.PageItem
+import com.paperscan.model.OcrStatus
 import com.paperscan.model.ScanMode
+import com.paperscan.model.ocrRevision
 import com.paperscan.viewmodel.PageEditUiState
-import kotlin.math.min
 
 @Composable
 fun PageEditScreen(
     page: PageItem,
     state: PageEditUiState,
     busy: Boolean,
-    onSaveCorners: (CornerPoints) -> Unit,
+    onCornerChanged: (Int, NormalizedPoint) -> Unit,
+    onSaveCorners: () -> Unit,
     onScanModeChanged: (ScanMode) -> Unit,
     onRotate: () -> Unit,
     onRedetect: () -> Unit,
+    onRecognize: () -> Unit,
     onBack: () -> Unit
 ) {
-    var corners by remember(page.id, page.corners) { mutableStateOf(page.corners ?: CornerPoints.fullImage()) }
     var showCorrected by remember(page.id) { mutableStateOf(false) }
+    val corners = state.cornerDraft?.editableCorners ?: page.corners ?: CornerPoints.fullImage()
     val preview = if (showCorrected) state.corrected ?: state.original else state.original
+    val context = LocalContext.current
+    val clipboard = context.getSystemService(ClipboardManager::class.java)
+    val currentOcr = page.ocrResult?.takeIf { it.revision == page.ocrRevision() && it.status == OcrStatus.COMPLETE }
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("ページ補正", style = MaterialTheme.typography.headlineSmall)
         Text(
@@ -66,7 +78,7 @@ fun PageEditScreen(
                     PreviewCanvas(preview, null) { _, _ -> }
                 } else {
                     PreviewCanvas(preview, corners) { index, point ->
-                        corners = corners.replace(index, point)
+                        onCornerChanged(index, point)
                     }
                 }
             } else {
@@ -85,27 +97,50 @@ fun PageEditScreen(
                 if (selected) {
                     Button(
                         onClick = { onScanModeChanged(mode) },
-                        enabled = !busy,
+                        enabled = !busy && !state.loading,
                         modifier = Modifier.weight(1f).semantics { testTag = "scan_mode_${mode.name}" }
                     ) { Text(mode.name) }
                 } else {
                     OutlinedButton(
                         onClick = { onScanModeChanged(mode) },
-                        enabled = !busy,
+                        enabled = !busy && !state.loading,
                         modifier = Modifier.weight(1f).semantics { testTag = "scan_mode_${mode.name}" }
                     ) { Text(mode.name) }
                 }
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(onClick = onRotate, enabled = !busy, modifier = Modifier.weight(1f)) { Text("90°回転") }
-            OutlinedButton(onClick = onRedetect, enabled = !busy, modifier = Modifier.weight(1f)) { Text("再検出") }
+            OutlinedButton(onClick = onRotate, enabled = !busy && !state.loading, modifier = Modifier.weight(1f)) { Text("90°回転") }
+            OutlinedButton(
+                onClick = {
+                    showCorrected = false
+                    onRedetect()
+                },
+                enabled = !busy && !state.loading,
+                modifier = Modifier.weight(1f)
+            ) { Text("再検出") }
         }
         Button(
-            onClick = { onSaveCorners(corners) },
-            enabled = !busy && !showCorrected,
+            onClick = onSaveCorners,
+            enabled = !busy && !state.loading && !showCorrected && state.cornerDraft != null,
             modifier = Modifier.fillMaxWidth().semantics { testTag = "page_edit_save" }
         ) { Text("四隅を保存") }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                onClick = onRecognize,
+                enabled = !busy && !state.loading && !state.ocrRunning,
+                modifier = Modifier.weight(1f)
+            ) { Text(if (state.ocrRunning) "OCR中…" else "OCRを再認識") }
+            OutlinedButton(
+                onClick = { currentOcr?.text?.takeIf(String::isNotBlank)?.let {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("PaperScan OCR", it))
+                } },
+                enabled = currentOcr != null,
+                modifier = Modifier.weight(1f)
+            ) { Text("認識文字をコピー") }
+        }
+        currentOcr?.let { Text("OCR結果: ${it.text.take(160)}") }
+        state.ocrError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         OutlinedButton(onClick = onBack, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("ページ一覧へ戻る") }
     }
 }
@@ -116,42 +151,49 @@ private fun PreviewCanvas(
     corners: CornerPoints?,
     onCornerChanged: (Int, NormalizedPoint) -> Unit
 ) {
-    var activeCorner by remember(bitmap, corners) { mutableIntStateOf(-1) }
+    var activeCorner by remember(bitmap) { mutableIntStateOf(-1) }
     val image = remember(bitmap) { bitmap.asImageBitmap() }
+    val latestCorners by rememberUpdatedState(corners)
+    val latestOnCornerChanged by rememberUpdatedState(onCornerChanged)
     Canvas(
         modifier = Modifier
             .fillMaxSize()
             .semantics { testTag = "page_edit_canvas" }
-            .pointerInput(bitmap, corners) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val position = event.changes.firstOrNull()?.position ?: continue
-                        val frame = fittedRect(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height)
-                        when {
-                            event.changes.any { it.pressed } && activeCorner < 0 && corners != null -> {
-                                activeCorner = corners.points.indices.minBy { index ->
-                                    val marker = toDisplay(corners.points[index], frame)
-                                    (marker - position).getDistance()
-                                }
-                            }
-                            event.changes.any { it.pressed } && activeCorner >= 0 && corners != null -> {
-                                onCornerChanged(activeCorner, toNormalized(position, frame))
-                            }
-                            event.changes.none { it.pressed } -> activeCorner = -1
+            .pointerInput(bitmap) {
+                detectDragGestures(
+                    onDragStart = { position ->
+                        val value = latestCorners ?: return@detectDragGestures
+                        val bounds = DisplayedImageBounds.fit(
+                            size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height
+                        )
+                        activeCorner = value.points.indices.minBy { index ->
+                            (bounds.toOffset(value.points[index]) - position).getDistance()
                         }
+                    },
+                    onDragEnd = { activeCorner = -1 },
+                    onDragCancel = { activeCorner = -1 }
+                ) { change, _ ->
+                    if (activeCorner >= 0 && latestCorners != null) {
+                        val bounds = DisplayedImageBounds.fit(
+                            size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height
+                        )
+                        latestOnCornerChanged(
+                            activeCorner,
+                            bounds.toNormalized(DisplayPoint(change.position.x, change.position.y))
+                        )
+                        change.consume()
                     }
                 }
             }
     ) {
-        val frame = fittedRect(size.width, size.height, bitmap.width, bitmap.height)
+        val frame = DisplayedImageBounds.fit(size.width, size.height, bitmap.width, bitmap.height)
         drawImage(
             image = image,
             dstOffset = IntOffset(frame.left.toInt(), frame.top.toInt()),
             dstSize = IntSize(frame.width.toInt(), frame.height.toInt())
         )
         corners?.let { value ->
-            val points = value.points.map { toDisplay(it, frame) }
+            val points = value.points.map(frame::toOffset)
             points.indices.forEach { index ->
                 drawLine(Color(0xFF1565C0), points[index], points[(index + 1) % points.size], strokeWidth = 4f)
                 drawCircle(Color(0xFFFFC107), 16f, points[index])
@@ -161,26 +203,5 @@ private fun PreviewCanvas(
     }
 }
 
-private fun fittedRect(containerWidth: Float, containerHeight: Float, imageWidth: Int, imageHeight: Int): Rect {
-    val scale = min(containerWidth / imageWidth, containerHeight / imageHeight)
-    val width = imageWidth * scale
-    val height = imageHeight * scale
-    return Rect((containerWidth - width) / 2f, (containerHeight - height) / 2f, (containerWidth + width) / 2f, (containerHeight + height) / 2f)
-}
-
-private fun toDisplay(point: NormalizedPoint, frame: Rect) = Offset(
-    frame.left + point.x * frame.width,
-    frame.top + point.y * frame.height
-)
-
-private fun toNormalized(point: Offset, frame: Rect) = NormalizedPoint(
-    ((point.x - frame.left) / frame.width).coerceIn(0f, 1f),
-    ((point.y - frame.top) / frame.height).coerceIn(0f, 1f)
-)
-
-private fun CornerPoints.replace(index: Int, point: NormalizedPoint): CornerPoints = when (index) {
-    0 -> copy(topLeft = point)
-    1 -> copy(topRight = point)
-    2 -> copy(bottomRight = point)
-    else -> copy(bottomLeft = point)
-}
+private fun DisplayedImageBounds.toOffset(point: NormalizedPoint): Offset =
+    toDisplay(point).let { Offset(it.x, it.y) }

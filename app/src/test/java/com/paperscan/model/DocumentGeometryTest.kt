@@ -63,6 +63,41 @@ class DocumentGeometryTest {
     }
 
     @Test
+    fun isValid_concaveQuad_returnsFalse() {
+        val corners = CornerPoints(
+            NormalizedPoint(0.1f, 0.1f), NormalizedPoint(0.9f, 0.1f),
+            NormalizedPoint(0.45f, 0.45f), NormalizedPoint(0.1f, 0.9f)
+        )
+
+        assertFalse(corners.isValid())
+    }
+
+    @Test
+    fun isValid_nonFiniteCoordinate_returnsFalse() {
+        val corners = CornerPoints(
+            NormalizedPoint(Float.NaN, 0.1f), NormalizedPoint(0.9f, 0.1f),
+            NormalizedPoint(0.9f, 0.9f), NormalizedPoint(0.1f, 0.9f)
+        )
+
+        assertFalse(corners.isValid())
+    }
+
+    @Test
+    fun rotateClockwise_mapsBackToCanonicalOrder() {
+        val source = CornerPoints(
+            NormalizedPoint(0.1f, 0.2f), NormalizedPoint(0.8f, 0.1f),
+            NormalizedPoint(0.9f, 0.7f), NormalizedPoint(0.2f, 0.8f)
+        )
+
+        val rotated = requireNotNull(source.rotateClockwise())
+
+        assertPointEquals(NormalizedPoint(0.2f, 0.2f), rotated.topLeft)
+        assertPointEquals(NormalizedPoint(0.8f, 0.1f), rotated.topRight)
+        assertPointEquals(NormalizedPoint(0.9f, 0.8f), rotated.bottomRight)
+        assertPointEquals(NormalizedPoint(0.3f, 0.9f), rotated.bottomLeft)
+    }
+
+    @Test
     fun toPixels_fullImage_mapsToImageBounds() {
         val actual = CornerPoints.fullImage().toPixels(100, 200)
 
@@ -86,5 +121,10 @@ class DocumentGeometryTest {
     fun fullImage_hasValidSimpleOrder() {
         assertTrue(CornerPoints.fullImage().isValid())
         assertNotNull(CornerPoints.fullImage().points)
+    }
+
+    private fun assertPointEquals(expected: NormalizedPoint, actual: NormalizedPoint) {
+        assertEquals(expected.x, actual.x, 0.0001f)
+        assertEquals(expected.y, actual.y, 0.0001f)
     }
 }

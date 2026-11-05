@@ -19,6 +19,15 @@ class PdfPageSizerTest {
         assertEquals(PdfPageSize(842, 595), PdfPageSizer.pageSizeFor(4210, 2975))
     }
 
+    @Test
+    fun calculatePageSize_fixedPaperAndManualOrientation_useSelectedDimensions() {
+        assertEquals(PdfPageSize(420, 595), PdfPageSizer.pageSizeFor(1000, 1400, PdfPaperSize.A5))
+        assertEquals(
+            PdfPageSize(792, 612),
+            PdfPageSizer.pageSizeFor(1000, 1400, PdfPaperSize.LETTER, PdfOrientation.LANDSCAPE)
+        )
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun calculatePageSize_zeroWidth_rejectsInvalidInput() {
         PdfPageSizer.pageSizeFor(0, 100)

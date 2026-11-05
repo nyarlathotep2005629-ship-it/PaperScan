@@ -10,6 +10,10 @@ import com.paperscan.model.SourceType
 import com.paperscan.model.CornerPoints
 import com.paperscan.model.DetectionConfidence
 import com.paperscan.model.NormalizedPoint
+import com.paperscan.model.NormalizedTextBounds
+import com.paperscan.model.OcrStatus
+import com.paperscan.model.OcrTextLine
+import com.paperscan.model.PageOcrResult
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -21,7 +25,7 @@ class SessionStoreInstrumentedTest {
     @Test
     fun saveAndLoad_roundTrip_preservesExifAndPageOrder() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val files = WorkingFileStore(context)
+        val files = WorkingFileStore.forIsolatedTest(context)
         files.deleteSessionFiles()
         val store = SessionStore(files)
         val session = ScanSession(
@@ -29,7 +33,14 @@ class SessionStoreInstrumentedTest {
             createdAtEpochMillis = 1,
             updatedAtEpochMillis = 2,
             pages = listOf(
-                page("first", 90, true, ScanMode.TEXT),
+                page("first", 90, true, ScanMode.TEXT).copy(
+                    ocrResult = PageOcrResult(
+                        revision = "revision-first",
+                        status = OcrStatus.COMPLETE,
+                        lines = listOf(OcrTextLine("日本語 PaperScan", NormalizedTextBounds(0.1f, 0.2f, 0.8f, 0.3f))),
+                        updatedAtEpochMillis = 3
+                    )
+                ),
                 cameraPage("second", 0, false, ScanMode.COLOR)
             ),
             selectedPageId = "first"
@@ -44,10 +55,31 @@ class SessionStoreInstrumentedTest {
         assertEquals(DetectionConfidence.HIGH, loaded.session.pages.first().detectionConfidence)
         assertEquals(NormalizedPoint(0.1f, 0.2f), loaded.session.pages.first().corners?.topLeft)
         assertEquals(ScanMode.TEXT, loaded.session.pages.first().scanMode)
+        assertEquals("日本語 PaperScan", loaded.session.pages.first().ocrResult?.text)
+        assertEquals("revision-first", loaded.session.pages.first().ocrResult?.revision)
         assertEquals(ScanMode.COLOR, loaded.session.pages.last().scanMode)
         assertEquals(SourceType.CAMERA, loaded.session.pages.last().sourceType)
         assertEquals("captures/second.jpg", loaded.session.pages.last().workingRelativePath)
         assertEquals(null, loaded.session.pages.last().sourceUri)
+        files.deleteSessionFiles()
+    }
+
+    @Test
+    fun loadSchemaV1_migratesAndSavesAsCurrentVersion() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val files = WorkingFileStore.forIsolatedTest(context)
+        files.sessionFile.parentFile?.mkdirs()
+        files.sessionFile.writeText(
+            """{"schemaVersion":1,"id":"legacy","createdAtEpochMillis":1,"updatedAtEpochMillis":2,"pages":[],"selectedPageId":null}""",
+            Charsets.UTF_8
+        )
+        val store = SessionStore(files)
+
+        val loaded = store.load() as SessionStore.LoadResult.Loaded
+
+        assertEquals(ScanSession.CURRENT_SCHEMA_VERSION, loaded.session.schemaVersion)
+        assertTrue(store.saveAtomic(loaded.session).isSuccess)
+        assertTrue(files.sessionFile.readText(Charsets.UTF_8).contains("\"schemaVersion\":${ScanSession.CURRENT_SCHEMA_VERSION}"))
         files.deleteSessionFiles()
     }
 

@@ -5,9 +5,14 @@ import com.paperscan.model.PageItem
 import java.io.File
 import java.util.UUID
 
-class WorkingFileStore(context: Context) {
-    private val filesRoot = File(context.filesDir, "scan_session")
-    private val cacheRoot = File(context.cacheDir, "paperscan")
+class WorkingFileStore private constructor(
+    private val filesRoot: File,
+    private val cacheRoot: File
+) {
+    constructor(context: Context) : this(
+        filesRoot = File(context.filesDir, "scan_session"),
+        cacheRoot = File(context.cacheDir, "paperscan")
+    )
 
     val sessionFile: File
         get() = File(filesRoot, "session.json")
@@ -59,5 +64,13 @@ class WorkingFileStore(context: Context) {
 
     fun cleanupStaleCache() {
         cacheRoot.deleteRecursively()
+    }
+
+    internal companion object {
+        /** Isolates Instrumented Test cleanup from an installed user's active scan session. */
+        fun forIsolatedTest(context: Context): WorkingFileStore {
+            val root = File(context.cacheDir, "paperscan-instrumented/${UUID.randomUUID()}")
+            return WorkingFileStore(File(root, "working"), File(root, "cache"))
+        }
     }
 }

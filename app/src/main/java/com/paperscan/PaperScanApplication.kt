@@ -7,6 +7,7 @@ import com.paperscan.camera.CameraCaptureService
 import com.paperscan.image.SourceImageLoader
 import com.paperscan.importer.PhotoImportService
 import com.paperscan.pdf.PdfExporter
+import com.paperscan.ocr.MlKitOcrService
 import com.paperscan.processing.OpenCvDocumentProcessor
 import com.paperscan.storage.SessionStore
 import com.paperscan.storage.WorkingFileStore
@@ -28,5 +29,6 @@ class AppContainer(context: Context) {
     val documentProcessor = OpenCvDocumentProcessor(sourceImageLoader)
     val photoImportService = PhotoImportService(context, workingFileStore, sourceImageLoader)
     val pdfExporter = PdfExporter(documentProcessor, workingFileStore)
+    val ocrService = MlKitOcrService()
     val cameraCaptureService = CameraCaptureService(workingFileStore, ContextCompat.getMainExecutor(context))
 }
