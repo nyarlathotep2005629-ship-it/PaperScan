@@ -167,7 +167,9 @@ private fun CameraPreview(
         } else {
             val providerFuture = ProcessCameraProvider.getInstance(context)
             var provider: ProcessCameraProvider? = null
+            var active = true
             val bind = Runnable {
+                if (!active) return@Runnable
                 runCatching {
                     provider = providerFuture.get().also { it.unbindAll() }
                     val resolutionSelector = ResolutionSelector.Builder()
@@ -212,6 +214,7 @@ private fun CameraPreview(
             }
             providerFuture.addListener(bind, ContextCompat.getMainExecutor(context))
             onDispose {
+                active = false
                 imageCapture = null
                 liveAnalyzer.resetForRebind()
                 provider?.unbindAll()

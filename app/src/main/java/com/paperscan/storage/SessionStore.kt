@@ -33,16 +33,40 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
         data class Corrupted(val cause: Throwable) : LoadResult
     }
 
-    fun exists(): Boolean = workingFileStore.sessionFile.exists()
+    fun exists(): Boolean = workingFileStore.sessionFile.let { file ->
+        file.exists() || backupFor(file).exists()
+    }
 
     suspend fun load(): LoadResult = withContext(Dispatchers.IO) {
         val file = workingFileStore.sessionFile
-        if (!file.exists()) return@withContext LoadResult.Missing
-        runCatching { parse(file.readText(Charsets.UTF_8)) }
-            .fold(
+        saveMutex.withLock {
+            val primary = if (file.exists()) runCatching { parse(file.readText(Charsets.UTF_8)) } else null
+            primary?.getOrNull()?.let { return@withLock LoadResult.Loaded(it) }
+
+            val backup = backupFor(file)
+            if (backup.exists()) {
+                val recovered = runCatching { parse(backup.readText(Charsets.UTF_8)) }
+                recovered.getOrNull()?.let { session ->
+                    // A fallback rename can be interrupted after moving the old file to .bak.
+                    // Restore through a separate file; keep .bak intact if restoration fails.
+                    runCatching {
+                        val recovery = File(file.parentFile, "${file.name}.recovery")
+                        try {
+                            backup.copyTo(recovery, overwrite = true)
+                            Files.move(recovery.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                        } finally {
+                            recovery.delete()
+                        }
+                    }
+                    return@withLock LoadResult.Loaded(session)
+                }
+                if (primary == null) return@withLock LoadResult.Corrupted(recovered.exceptionOrNull()!!)
+            }
+            primary?.fold(
                 onSuccess = { LoadResult.Loaded(it) },
                 onFailure = { LoadResult.Corrupted(it) }
-            )
+            ) ?: LoadResult.Missing
+        }
     }
 
     suspend fun saveAtomic(session: ScanSession): Result<Unit> = withContext(Dispatchers.IO) {
@@ -83,9 +107,9 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
             // Some Android file systems do not support atomic replacement. Use a recoverable fallback.
         }
 
-        val backup = File(target.parentFile, "${target.name}.bak")
-        if (backup.exists() && !backup.delete()) error("以前のバックアップを削除できませんでした。")
+        val backup = backupFor(target)
         val hadTarget = target.exists()
+        if (hadTarget && backup.exists() && !backup.delete()) error("以前のバックアップを削除できませんでした。")
         if (hadTarget && !target.renameTo(backup)) error("既存セッションを退避できませんでした。")
         try {
             if (!temporary.renameTo(target)) error("新しいセッション情報を配置できませんでした。")
@@ -97,6 +121,8 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
             throw failure
         }
     }
+
+    private fun backupFor(target: File): File = File(target.parentFile, "${target.name}.bak")
 
     private fun serialize(session: ScanSession): String = JSONObject().apply {
         put("schemaVersion", session.schemaVersion)

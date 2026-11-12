@@ -28,6 +28,56 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class SessionStoreInstrumentedTest {
     @Test
+    fun load_interruptedFallbackRename_recoversValidatedBackup() = runBlocking {
+        val files = WorkingFileStore.forIsolatedTest(InstrumentationRegistry.getInstrumentation().targetContext)
+        val store = SessionStore(files)
+        try {
+            assertTrue(store.saveAtomic(emptySession("recover-me")).isSuccess)
+            val backup = File(files.sessionFile.parentFile, "${files.sessionFile.name}.bak")
+            assertTrue(files.sessionFile.renameTo(backup))
+
+            assertTrue(store.exists())
+            val loaded = store.load() as SessionStore.LoadResult.Loaded
+            assertEquals("recover-me", loaded.session.id)
+            assertEquals("recover-me", (store.load() as SessionStore.LoadResult.Loaded).session.id)
+            assertTrue("backup remains available until a later successful save", backup.exists())
+        } finally {
+            files.deleteSessionFiles()
+        }
+    }
+
+    @Test
+    fun load_corruptPrimary_prefersValidatedBackupWithoutDiscardingIt() = runBlocking {
+        val files = WorkingFileStore.forIsolatedTest(InstrumentationRegistry.getInstrumentation().targetContext)
+        val store = SessionStore(files)
+        try {
+            assertTrue(store.saveAtomic(emptySession("last-good")).isSuccess)
+            val backup = File(files.sessionFile.parentFile, "${files.sessionFile.name}.bak")
+            files.sessionFile.copyTo(backup)
+            files.sessionFile.writeText("{broken", Charsets.UTF_8)
+
+            val loaded = store.load() as SessionStore.LoadResult.Loaded
+            assertEquals("last-good", loaded.session.id)
+            assertTrue(backup.exists())
+        } finally {
+            files.deleteSessionFiles()
+        }
+    }
+
+    @Test
+    fun load_invalidBackupWithoutPrimary_reportsCorruption() = runBlocking {
+        val files = WorkingFileStore.forIsolatedTest(InstrumentationRegistry.getInstrumentation().targetContext)
+        val backup = File(files.sessionFile.parentFile, "${files.sessionFile.name}.bak")
+        try {
+            backup.parentFile?.mkdirs()
+            backup.writeText("{broken", Charsets.UTF_8)
+            assertTrue(SessionStore(files).load() is SessionStore.LoadResult.Corrupted)
+        } finally {
+            files.deleteSessionFiles()
+        }
+    }
+
+    @Test
     fun saveAtomic_TC_SESSION_008_concurrentRequestsRemainValidAndDoNotShareTempWrites() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val files = WorkingFileStore.forIsolatedTest(context)

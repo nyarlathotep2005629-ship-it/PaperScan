@@ -35,6 +35,58 @@ import org.opencv.imgproc.Imgproc
 @RunWith(AndroidJUnit4::class)
 class OpenCvDocumentProcessorInstrumentedTest {
     @Test
+    fun detectGroundTruth_datasetSummary_recordsMissesFalsePositivesGeometryAndTime() {
+        val context = InstrumentationRegistry.getInstrumentation().context
+        val dataset = context.assets.open("fixtures/detection_ground_truth.json").bufferedReader().use {
+            JSONObject(it.readText()).getJSONArray("fixtures")
+        }
+        val detector = processor()
+        var positives = 0
+        var negatives = 0
+        var hits = 0
+        var falsePositives = 0
+        var totalCornerError = 0.0
+        var totalIou = 0.0
+        val timings = mutableListOf<Double>()
+        for (index in 0 until dataset.length()) {
+            val truth = dataset.getJSONObject(index)
+            val bitmap = fixture(truth.getString("file"))
+            try {
+                assertEquals(truth.getInt("width"), bitmap.width)
+                assertEquals(truth.getInt("height"), bitmap.height)
+                val started = android.os.SystemClock.elapsedRealtimeNanos()
+                val result = detector.detectBitmap(bitmap)
+                timings += (android.os.SystemClock.elapsedRealtimeNanos() - started) / 1_000_000.0
+                if (!truth.optBoolean("present", true)) {
+                    negatives++
+                    if (result.corners != null) falsePositives++
+                    continue
+                }
+                positives++
+                val actual = result.corners ?: continue
+                hits++
+                val array = truth.getJSONArray("corners")
+                val expected = List(4) { corner ->
+                    val point = array.getJSONArray(corner)
+                    NormalizedPoint(point.getDouble(0).toFloat(), point.getDouble(1).toFloat())
+                }
+                totalCornerError += expected.zip(actual.points).map { (a, b) ->
+                    kotlin.math.hypot(((a.x - b.x) * bitmap.width).toDouble(), ((a.y - b.y) * bitmap.height).toDouble())
+                }.average()
+                totalIou += polygonIou(expected, actual.points, bitmap.width, bitmap.height)
+            } finally {
+                bitmap.recycle()
+            }
+        }
+        assertEquals(10, positives)
+        assertEquals(1, negatives)
+        Log.i("PaperScanDetectionMetric",
+            "dataset=synthetic-v1 positives=$positives hits=$hits misses=${positives - hits} negatives=$negatives " +
+                "falsePositives=$falsePositives meanCornerErrorPx=${if (hits > 0) totalCornerError / hits else Double.NaN} " +
+                "meanIoU=${if (hits > 0) totalIou / hits else Double.NaN} meanMillis=${timings.average()}")
+    }
+
+    @Test
     fun detectGroundTruth_TC_DET_001_measuresIndependentSyntheticCornerErrorAndIoU() {
         val context = InstrumentationRegistry.getInstrumentation().context
         val dataset = context.assets.open("fixtures/detection_ground_truth.json").bufferedReader().use { reader ->

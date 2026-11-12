@@ -31,9 +31,52 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class SearchablePdfExporterInstrumentedTest {
+    @Test
+    fun export_moreThan255DistinctCjkCharacters_usesMultipleSelfContainedFonts() = kotlinx.coroutines.runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        PDFBoxResourceLoader.init(object : ContextWrapper(context) {
+            override fun getApplicationContext(): Context = instrumentation.context
+        })
+        val files = WorkingFileStore.forIsolatedTest(context)
+        val base = searchablePage("many-cjk", null)
+        val expectedLines = (0 until 3).map { row ->
+            (0 until 100).joinToString("") { column -> (0x4E00 + row * 100 + column).toChar().toString() }
+        }
+        val page = base.copy(ocrResult = PageOcrResult(
+            revision = base.ocrRevision(), status = OcrStatus.COMPLETE,
+            lines = expectedLines.mapIndexed { index, text ->
+                OcrTextLine(text, NormalizedTextBounds(0.05f, 0.10f + index * 0.10f, 0.95f, 0.15f + index * 0.10f))
+            }, updatedAtEpochMillis = 1
+        ))
+        val session = ScanSession(id = "many-cjk", createdAtEpochMillis = 0,
+            updatedAtEpochMillis = 0, pages = listOf(page), selectedPageId = page.id)
+        val processor = object : DocumentProcessor {
+            override suspend fun detect(page: PageItem): DetectionResult = error("Not used")
+            override suspend fun loadOriginalPreview(page: PageItem): Bitmap = error("Not used")
+            override suspend fun createCorrectedPreview(page: PageItem): Bitmap = error("Not used")
+            override suspend fun processForExport(page: PageItem): Bitmap =
+                Bitmap.createBitmap(595, 842, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+        }
+        try {
+            val result = PdfExporter(processor, files).export(session, includeSearchableText = true) { _, _ -> }
+            assertTrue(result is ExportResult.Success)
+            PDDocument.load((result as ExportResult.Success).tempFile).use { document ->
+                val fonts = document.getPage(0).resources.fontNames.mapNotNull(document.getPage(0).resources::getFont)
+                assertTrue("300 distinct Unicode characters need more than one simple font", fonts.size >= 2)
+                assertTrue(fonts.all { it.cosObject.getNameAsString(COSName.SUBTYPE) == "Type3" })
+                val extracted = PDFTextStripper().getText(document)
+                expectedLines.forEach { line -> assertTrue("CJK line must be extractable", extracted.contains(line)) }
+            }
+        } finally {
+            files.cleanupStaleCache()
+        }
+    }
+
     @Test
     fun export_TC_PDF_007_longCjkAndSupplementaryTextRoundTripsAcrossPages() = kotlinx.coroutines.runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -158,6 +201,9 @@ class SearchablePdfExporterInstrumentedTest {
                     pageBitmap.recycle()
                 }
             }
+        }
+        if (InstrumentationRegistry.getArguments().getString("pdfEvidence") == "true") {
+            output.copyTo(File(context.getExternalFilesDir(null), "paperscan-pdf-compat-synthetic.pdf"), overwrite = true)
         }
         output.delete()
         files.cleanupStaleCache()

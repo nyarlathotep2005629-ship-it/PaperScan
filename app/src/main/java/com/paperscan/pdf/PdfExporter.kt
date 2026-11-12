@@ -6,6 +6,7 @@ import com.paperscan.model.ocrRevision
 import com.paperscan.processing.DocumentProcessor
 import com.paperscan.storage.WorkingFileStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import java.io.FileOutputStream
 
@@ -48,6 +49,9 @@ class PdfExporter(
             }
             check(output.exists() && output.length() > 0) { "PDFファイルを生成できませんでした。" }
             ExportResult.Success(output, session.pages.size, output.length())
+        } catch (cancelled: CancellationException) {
+            output.delete()
+            throw cancelled
         } catch (failure: Throwable) {
             output.delete()
             ExportResult.Failure(exportingPageIndex, failure)

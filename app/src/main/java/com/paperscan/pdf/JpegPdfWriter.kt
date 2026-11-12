@@ -21,6 +21,8 @@ import java.util.Locale
  * Android's PdfDocument has no public control for embedded image encoding. This writer
  * embeds one opaque JPEG image per page so the scan output has a bounded raster size and
  * predictable DCT compression, while keeping the existing PDF point sizing and page order.
+ * OCR text uses self-contained, invisible Type 3 fonts: no device font or unlicensed CJK
+ * font file is required, and ToUnicode provides the actual searchable characters.
  */
 internal class JpegPdfWriter(
     output: File,
@@ -28,7 +30,8 @@ internal class JpegPdfWriter(
     private val settings: PdfExportSettings = PdfExportSettings()
 ) : AutoCloseable {
     private val countingOutput = CountingOutputStream(FileOutputStream(output))
-    private val objectOffsets = LongArray(3 + pageCount * OBJECTS_PER_PAGE)
+    private val objectOffsets = mutableListOf(0L, 0L, 0L)
+    private val pageObjects = mutableListOf<Int>()
     private var nextPageIndex = 0
     private var finished = false
 
@@ -51,13 +54,12 @@ internal class JpegPdfWriter(
             settings.orientation
         )
         val pageIndex = nextPageIndex++
-        val pageObject = pageObjectNumber(pageIndex)
-        val imageObject = pageObject + 1
-        val contentObject = pageObject + 2
-        val type0FontObject = pageObject + 3
-        val cidFontObject = pageObject + 4
-        val fontDescriptorObject = pageObject + 5
-        val toUnicodeObject = pageObject + 6
+        val pageObject = allocateObject().also(pageObjects::add)
+        val imageObject = allocateObject()
+        val contentObject = allocateObject()
+        val text = encodeText(ocrLines)
+        val blankGlyphObject = if (text.fonts.isNotEmpty()) allocateObject() else null
+        val fontObjects = text.fonts.map { allocateObject() to allocateObject() }
         val rasterSize = PdfRasterSizer.sizeFor(
             pageSize,
             source.width,
@@ -68,9 +70,10 @@ internal class JpegPdfWriter(
         try {
             val draw = PdfPageSizer.fitRect(pageSize, rasterSize.widthPixels, rasterSize.heightPixels)
             writeObject(pageObject) {
+                val fontResources = fontObjects.mapIndexed { index, pair -> "/F$index ${pair.first} 0 R" }.joinToString(" ")
                 writeAscii(
                     "<< /Type /Page /Parent $PAGES_OBJECT 0 R /MediaBox [0 0 ${pageSize.widthPoints} ${pageSize.heightPoints}] " +
-                        "/Resources << /XObject << /Im$pageIndex $imageObject 0 R >> /Font << /F0 $type0FontObject 0 R >> >> " +
+                        "/Resources << /XObject << /Im$pageIndex $imageObject 0 R >> /Font << $fontResources >> >> " +
                         "/Contents $contentObject 0 R >>\n"
                 )
             }
@@ -89,7 +92,7 @@ internal class JpegPdfWriter(
                 pageSize.heightPoints - draw.bottom,
                 pageIndex
             )
-            val textContent = createInvisibleTextContent(pageSize, draw, ocrLines)
+            val textContent = createInvisibleTextContent(pageSize, draw, text.lines)
             val content = (imageContent + textContent).toByteArray(StandardCharsets.US_ASCII)
             writeStreamObject(
                 objectNumber = contentObject,
@@ -97,35 +100,27 @@ internal class JpegPdfWriter(
                 bytes = content
             )
 
-            writeObject(type0FontObject) {
-                writeAscii(
-                    "<< /Type /Font /Subtype /Type0 /BaseFont /HeiseiMin-W3 /Encoding /Identity-H " +
-                        "/DescendantFonts [$cidFontObject 0 R] /ToUnicode $toUnicodeObject 0 R >>\n"
-                )
+            blankGlyphObject?.let { glyphObject ->
+                val glyph = "1000 0 d0\n".toByteArray(StandardCharsets.US_ASCII)
+                writeStreamObject(glyphObject, "<< /Length ${glyph.size} >>", glyph)
+                text.fonts.forEachIndexed { index, font ->
+                    val (fontObject, toUnicodeObject) = fontObjects[index]
+                    val names = List(font.codePoints.size) { "/blank" }.joinToString(" ")
+                    val widths = List(font.codePoints.size) { "1000" }.joinToString(" ")
+                    writeObject(fontObject) {
+                        writeAscii(
+                            "<< /Type /Font /Subtype /Type3 /Name /F$index /FontBBox [0 0 1000 1000] " +
+                                "/FontMatrix [0.001 0 0 0.001 0 0] " +
+                                "/CharProcs << /.notdef $glyphObject 0 R /blank $glyphObject 0 R >> " +
+                                "/Encoding << /Type /Encoding /Differences [1 $names] >> " +
+                                "/FirstChar 1 /LastChar ${font.codePoints.size} /Widths [$widths] " +
+                                "/ToUnicode $toUnicodeObject 0 R >>\n"
+                        )
+                    }
+                    val cmap = createToUnicodeCMap(font.codePoints)
+                    writeStreamObject(toUnicodeObject, "<< /Length ${cmap.size} >>", cmap)
+                }
             }
-            val glyphCount = ocrLines.sumOf { it.text.codePointCount(0, it.text.length) }
-            require(glyphCount < 0xFFFF) { "OCRテキストが1ページのPDF文字レイヤー上限を超えています。" }
-            val toUnicode = createToUnicodeCMap(ocrLines)
-            writeObject(cidFontObject) {
-                val widths = List(glyphCount) { "1000" }.joinToString(" ")
-                val widthTable = if (glyphCount == 0) "" else " /W [1 [$widths]]"
-                writeAscii(
-                    "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /HeiseiMin-W3 " +
-                        "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> " +
-                        "/FontDescriptor $fontDescriptorObject 0 R /DW 1000$widthTable /CIDToGIDMap /Identity >>\n"
-                )
-            }
-            writeObject(fontDescriptorObject) {
-                writeAscii(
-                    "<< /Type /FontDescriptor /FontName /HeiseiMin-W3 /Flags 4 /FontBBox [0 -250 1000 1000] " +
-                        "/ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 700 /StemV 80 >>\n"
-                )
-            }
-            writeStreamObject(
-                objectNumber = toUnicodeObject,
-                dictionary = "<< /Length ${toUnicode.size} >>",
-                bytes = toUnicode
-            )
         } finally {
             jpeg.fill(0)
         }
@@ -135,11 +130,12 @@ internal class JpegPdfWriter(
         check(!finished) { "PDFはすでに完了しています。" }
         check(nextPageIndex == pageCount) { "PDFページ数が不足しています。" }
         writeObject(PAGES_OBJECT) {
-            val kids = (0 until pageCount).joinToString(" ") { "${pageObjectNumber(it)} 0 R" }
+            val kids = pageObjects.joinToString(" ") { "$it 0 R" }
             writeAscii("<< /Type /Pages /Kids [$kids] /Count $pageCount >>\n")
         }
         val xrefOffset = countingOutput.count
         val objectCount = objectOffsets.size - 1
+        check((1..objectCount).all { objectOffsets[it] > 0L }) { "PDFオブジェクトが不足しています。" }
         writeAscii("xref\n0 ${objectCount + 1}\n0000000000 65535 f \n")
         (1..objectCount).forEach { objectNumber ->
             writeAscii(String.format(Locale.US, "%010d 00000 n \n", objectOffsets[objectNumber]))
@@ -152,51 +148,76 @@ internal class JpegPdfWriter(
         countingOutput.close()
     }
 
-    private fun pageObjectNumber(pageIndex: Int): Int = FIRST_PAGE_OBJECT + pageIndex * OBJECTS_PER_PAGE
+    private fun allocateObject(): Int = objectOffsets.size.also { objectOffsets.add(0L) }
 
     private fun createInvisibleTextContent(
         pageSize: PdfPageSize,
         draw: PdfDrawRect,
-        lines: List<OcrTextLine>
+        lines: List<EncodedLine>
     ): String {
-        var nextCode = 1
         val commands = StringBuilder()
-        lines.sortedWith(compareBy<OcrTextLine> { it.bounds.top }.thenBy { it.bounds.left }).forEach { line ->
-            val codePoints = line.text.codePoints().toArray()
-            if (codePoints.isEmpty()) return@forEach
-            val encoded = buildString(codePoints.size * 4) {
-                repeat(codePoints.size) { append("%04X".format(nextCode++)) }
-            }
-            val x = draw.left + line.bounds.left * (draw.right - draw.left)
-            val top = draw.top + line.bounds.top * (draw.bottom - draw.top)
-            val bottom = draw.top + line.bounds.bottom * (draw.bottom - draw.top)
-            val width = (line.bounds.right - line.bounds.left) * (draw.right - draw.left)
+        lines.forEach { encodedLine ->
+            val bounds = encodedLine.line.bounds
+            val x = draw.left + bounds.left * (draw.right - draw.left)
+            val top = draw.top + bounds.top * (draw.bottom - draw.top)
+            val bottom = draw.top + bounds.bottom * (draw.bottom - draw.top)
+            val width = (bounds.right - bounds.left) * (draw.right - draw.left)
             val height = (bottom - top).coerceAtLeast(1f)
             val fontSize = height.coerceAtLeast(MIN_TEXT_SIZE_POINTS)
-            val horizontalScale = (width / (fontSize * codePoints.size)).coerceIn(0.01f, 100f)
-            commands.append(String.format(
-                Locale.US,
-                "BT /F0 %.4f Tf 3 Tr %.6f 0 0 1 %.4f %.4f Tm <%s> Tj ET\n",
-                fontSize,
-                horizontalScale,
-                x,
-                pageSize.heightPoints - bottom,
-                encoded
-            ))
+            val total = encodedLine.runs.sumOf { it.codes.size }
+            if (total == 0) return@forEach
+            val horizontalScale = (width / (fontSize * total)).coerceIn(0.01f, 100f)
+            var offset = 0
+            encodedLine.runs.forEach { run ->
+                val encoded = run.codes.joinToString("") { "%02X".format(it) }
+                commands.append(String.format(
+                    Locale.US,
+                    "BT /F%d %.4f Tf 3 Tr %.6f 0 0 1 %.4f %.4f Tm <%s> Tj ET\n",
+                    run.fontIndex,
+                    fontSize,
+                    horizontalScale,
+                    x + width * offset / total,
+                    pageSize.heightPoints - bottom,
+                    encoded
+                ))
+                offset += run.codes.size
+            }
         }
         return commands.toString()
     }
 
-    private fun createToUnicodeCMap(lines: List<OcrTextLine>): ByteArray {
-        val entries = buildList {
-            var nextCode = 1
-            lines.sortedWith(compareBy<OcrTextLine> { it.bounds.top }.thenBy { it.bounds.left }).forEach { line ->
-                line.text.codePoints().toArray().forEach { codePoint ->
-                    val unicodeHex = String(Character.toChars(codePoint)).toByteArray(StandardCharsets.UTF_16BE)
-                        .joinToString("") { byte -> "%02X".format(byte.toInt() and 0xFF) }
-                    add("<%04X> <$unicodeHex>".format(nextCode++))
+    /** Simple PDF fonts have one-byte codes, so a page may need several fonts for CJK text. */
+    private fun encodeText(lines: List<OcrTextLine>): EncodedText {
+        val fonts = mutableListOf<EncodedFont>()
+        val encodedLines = lines.sortedWith(compareBy<OcrTextLine> { it.bounds.top }.thenBy { it.bounds.left })
+            .mapNotNull { line ->
+                val runs = mutableListOf<EncodedRun>()
+                line.text.codePoints().forEach { codePoint ->
+                    val fontIndex = fonts.indexOfFirst { codePoint in it.codePoints }.takeIf { it >= 0 }
+                        ?: run {
+                            if (fonts.isEmpty() || fonts.last().codePoints.size == MAX_CODES_PER_FONT) {
+                                fonts += EncodedFont()
+                            }
+                            fonts.lastIndex
+                        }
+                    val font = fonts[fontIndex]
+                    val code = font.codePoints.getOrPut(codePoint) { font.codePoints.size + 1 }
+                    if (runs.lastOrNull()?.fontIndex == fontIndex) {
+                        runs.last().codes += code
+                    } else {
+                        runs += EncodedRun(fontIndex, mutableListOf(code))
+                    }
                 }
+                runs.takeIf { it.isNotEmpty() }?.let { EncodedLine(line, it) }
             }
+        return EncodedText(fonts, encodedLines)
+    }
+
+    private fun createToUnicodeCMap(codePoints: Map<Int, Int>): ByteArray {
+        val entries = codePoints.map { (codePoint, code) ->
+            val unicodeHex = String(Character.toChars(codePoint)).toByteArray(StandardCharsets.UTF_16BE)
+                .joinToString("") { byte -> "%02X".format(byte.toInt() and 0xFF) }
+            "<%02X> <$unicodeHex>".format(code)
         }
         val blocks = entries.chunked(100).joinToString("\n") { block ->
             "${block.size} beginbfchar\n${block.joinToString("\n")}\nendbfchar"
@@ -209,7 +230,7 @@ internal class JpegPdfWriter(
             /CMapName /PaperScan-Identity-UCS def
             /CMapType 2 def
             1 begincodespacerange
-            <0000> <FFFF>
+            <01> <FF>
             endcodespacerange
             $blocks
             endcmap
@@ -284,10 +305,14 @@ internal class JpegPdfWriter(
     private companion object {
         const val CATALOG_OBJECT = 1
         const val PAGES_OBJECT = 2
-        const val FIRST_PAGE_OBJECT = 3
-        const val OBJECTS_PER_PAGE = 7
+        const val MAX_CODES_PER_FONT = 255
         const val MIN_TEXT_SIZE_POINTS = 2f
     }
+
+    private data class EncodedFont(val codePoints: MutableMap<Int, Int> = linkedMapOf())
+    private data class EncodedRun(val fontIndex: Int, val codes: MutableList<Int>)
+    private data class EncodedLine(val line: OcrTextLine, val runs: List<EncodedRun>)
+    private data class EncodedText(val fonts: List<EncodedFont>, val lines: List<EncodedLine>)
 }
 
 private class CountingOutputStream(private val delegate: OutputStream) : OutputStream() {

@@ -19,6 +19,7 @@ import com.paperscan.processing.DocumentProcessor
 import com.paperscan.storage.WorkingFileStore
 import com.paperscan.processing.OpenCvDocumentProcessor
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -29,6 +30,37 @@ import android.util.Log
 
 @RunWith(AndroidJUnit4::class)
 class PdfExporterInstrumentedTest {
+    @Test
+    fun export_cancelledProcessing_deletesPartialPdfAndPropagatesCancellation() = runBlocking {
+        val files = WorkingFileStore.forIsolatedTest(InstrumentationRegistry.getInstrumentation().targetContext)
+        val page = PageItem(
+            id = "cancelled-export", sourceType = SourceType.IMPORT, sourceUri = null,
+            workingRelativePath = null, thumbnailRelativePath = null,
+            sourceExifRotationDegrees = 0, sourceExifFlipped = false, rotationQuarterTurns = 0,
+            scanMode = ScanMode.AUTO, status = PageStatus.READY
+        )
+        val session = ScanSession(id = "cancelled-export", createdAtEpochMillis = 0,
+            updatedAtEpochMillis = 0, pages = listOf(page), selectedPageId = page.id)
+        val processor = object : DocumentProcessor {
+            override suspend fun detect(page: PageItem): DetectionResult = error("Not used")
+            override suspend fun loadOriginalPreview(page: PageItem): Bitmap = error("Not used")
+            override suspend fun createCorrectedPreview(page: PageItem): Bitmap = error("Not used")
+            override suspend fun processForExport(page: PageItem): Bitmap = throw CancellationException("cancelled")
+        }
+        try {
+            var propagated = false
+            try {
+                PdfExporter(processor, files).export(session) { _, _ -> }
+            } catch (_: CancellationException) {
+                propagated = true
+            }
+            assertTrue("cancellation must not be returned as a product failure", propagated)
+            assertTrue("partial PDF must be deleted", !files.exportTempFile(session.id).exists())
+        } finally {
+            files.cleanupStaleCache()
+        }
+    }
+
     @Test
     fun export_qualityPresets_measureSyntheticA4RasterAndPdfSize() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
