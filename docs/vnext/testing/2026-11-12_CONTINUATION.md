@@ -83,7 +83,7 @@ OpenCV 4.13.0の[公式ライセンス](https://opencv.org/license/)はApache 2.
 ## Git反映と再開
 
 - コード・テスト: `d01ae28`（検索可能PDF、復旧、キャンセル、Camera bind、検知計測）。
-- 検証記録: `1bc7612`。この節の追記は別コミットへ保存する。
+- 検証記録: `1bc7612`。当初のpush保留状態は`0dc5050`に記録した。
 - 既存ブランチ`codex/paperscan-vnext-foundation`を維持し、`main`は変更していない。未追跡`APK/`は一切ステージ・変更していない。
-- `git push origin codex/paperscan-vnext-foundation`は自動承認審査が2回拒否したためBLOCKED。審査理由は、公開GitHubへの今回の2コミット分の送信について具体的な承認を確認できないというもの。GitHub本人所有とpush権限、既存のリモートブランチは読み取り確認したが、別経路での送信は行わない。
-- ユーザーの明示的な再承認と実行環境の許可が得られたら、`git status --short --branch`で`APK/`以外を確認し、`git push origin codex/paperscan-vnext-foundation`を通常実行する。その後`main`との差分を確認してPRを作成する。force pushと署名鍵作成は不要。
+- その後ユーザーがpushを明示的に承認し、`git push origin codex/paperscan-vnext-foundation`は通常pushで成功した。force pushは行っていない。
+- `main`に対する[ドラフトPR #2](https://github.com/nyarlathotep2005629-ship-it/PaperScan/pull/2)を作成した。Release受入保留と残作業をPR本文に明記し、マージはしていない。
