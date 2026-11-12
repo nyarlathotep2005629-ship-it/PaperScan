@@ -78,11 +78,11 @@ class SourceImageLoader(
     }
 
     private fun calculateSampleSize(width: Int, height: Int, maxLongEdgePx: Int): Int {
+        require(maxLongEdgePx > 0)
         var sample = 1
-        var longest = maxOf(width, height)
-        while (longest / 2 >= maxLongEdgePx) {
+        val longest = maxOf(width, height)
+        while ((longest + sample - 1) / sample > maxLongEdgePx) {
             sample *= 2
-            longest /= 2
         }
         return sample
     }

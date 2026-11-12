@@ -33,4 +33,22 @@ object SessionOperations {
             selectedPageId = nextSelected
         )
     }
+
+    /** Applies a processing mode without changing page order or user-edited corners. */
+    fun applyScanMode(session: ScanSession, pageIds: Set<String>, mode: ScanMode, now: Long): ScanSession? {
+        if (pageIds.isEmpty()) return null
+        var changed = false
+        val updatedPages = session.pages.map { page ->
+            if (page.id !in pageIds || page.scanMode == mode) {
+                page
+            } else {
+                changed = true
+                page.copy(scanMode = mode, ocrResult = null)
+            }
+        }
+        return if (changed) session.copy(
+            updatedAtEpochMillis = now,
+            pages = updatedPages
+        ) else null
+    }
 }

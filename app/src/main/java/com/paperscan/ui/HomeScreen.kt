@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -22,6 +23,8 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun HomeScreen(
     recoveryAvailable: Boolean,
+    themeLabel: String = "システム",
+    onThemeClick: () -> Unit = {},
     onCameraClick: () -> Unit,
     onImportClick: () -> Unit,
     onResumeClick: () -> Unit,
@@ -31,7 +34,10 @@ fun HomeScreen(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text("PaperScan", style = MaterialTheme.typography.headlineMedium)
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("PaperScan", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.weight(1f))
+            OutlinedButton(onClick = onThemeClick) { Text("外観: $themeLabel") }
+        }
         Button(
             modifier = Modifier.fillMaxWidth().semantics { testTag = "home_camera" },
             onClick = onCameraClick

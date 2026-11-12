@@ -22,12 +22,14 @@ import org.opencv.core.Point
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /** OpenCV-only implementation. All callers receive EXIF- and user-rotation-corrected bitmaps. */
 class OpenCvDocumentProcessor(
     private val imageLoader: SourceImageLoader
-) : DocumentProcessor {
+) : DocumentProcessor, CameraFrameDocumentDetector {
     override suspend fun detect(page: PageItem): DetectionResult = withContext(Dispatchers.Default) {
         val preview = imageLoader.decodePreview(page, DETECTION_LONG_EDGE_PX)
         try {
@@ -64,8 +66,9 @@ class OpenCvDocumentProcessor(
             Imgproc.cvtColor(rgba, gray, Imgproc.COLOR_RGBA2GRAY)
             Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
             val median = Core.mean(blurred).`val`[0]
-            val lower = (median * 0.66).coerceIn(25.0, 110.0)
-            Imgproc.Canny(blurred, edges, lower, (lower * 2.0).coerceAtMost(220.0))
+            // Low-contrast white paper on a light desk needs a lower threshold than printed content.
+            val lower = (median * 0.08).coerceIn(8.0, 24.0)
+            Imgproc.Canny(blurred, edges, lower, (lower * 3.5).coerceAtMost(84.0))
             val morphologyKernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
             try {
                 Imgproc.morphologyEx(
@@ -78,9 +81,17 @@ class OpenCvDocumentProcessor(
                 morphologyKernel.release()
             }
             Imgproc.findContours(edges, contours, hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
-            val candidate = contours.mapNotNull { contour -> candidateFor(contour, bitmap.width, bitmap.height) }
+            val candidate = contours.mapNotNull { contour ->
+                candidateFor(contour, bitmap.width, bitmap.height, edges)
+            }
                 .maxByOrNull(Candidate::score)
-            return candidate?.toResult() ?: DetectionResult(null, DetectionConfidence.LOW)
+            return candidate?.toResult(bitmap.width, bitmap.height)
+                ?: DetectionResult(
+                    corners = null,
+                    confidence = DetectionConfidence.LOW,
+                    previewWidth = bitmap.width,
+                    previewHeight = bitmap.height
+                )
         } finally {
             contours.forEach(Mat::release)
             hierarchy.release()
@@ -90,6 +101,8 @@ class OpenCvDocumentProcessor(
             rgba.release()
         }
     }
+
+    override fun detect(bitmap: Bitmap): DetectionResult = detectBitmap(bitmap)
 
     private fun process(source: Bitmap, page: PageItem): Bitmap {
         ensureInitialized()
@@ -106,7 +119,7 @@ class OpenCvDocumentProcessor(
         }
     }
 
-    private fun candidateFor(contour: MatOfPoint, width: Int, height: Int): Candidate? {
+    private fun candidateFor(contour: MatOfPoint, width: Int, height: Int, edges: Mat): Candidate? {
         val contour2f = MatOfPoint2f(*contour.toArray())
         val approximation = MatOfPoint2f()
         try {
@@ -132,8 +145,14 @@ class OpenCvDocumentProcessor(
             val angles = rectangularity(pixelCorners)
             val shapeScore = ((angles + convexity(pixelCorners)) / 2f).coerceIn(0f, 1f)
             val areaScore = ((areaRatio - MINIMUM_AREA_RATIO) / (0.75f - MINIMUM_AREA_RATIO)).coerceIn(0f, 1f)
-            val edgeScore = imageEdgeScore(corners)
-            val score = 0.55f * areaScore + 0.35f * shapeScore + 0.10f * edgeScore
+            val boundarySupport = boundarySupport(pixelCorners, edges)
+            val frameScore = imageFrameScore(corners, areaRatio)
+            val score = (
+                0.45f * areaScore +
+                    0.30f * shapeScore +
+                    0.20f * boundarySupport +
+                    0.05f * frameScore
+                ) * frameScore
             return Candidate(corners, score)
         } finally {
             approximation.release()
@@ -297,18 +316,58 @@ class OpenCvDocumentProcessor(
         return if (crossProducts.all { it > 0f } || crossProducts.all { it < 0f }) 1f else 0f
     }
 
-    private fun imageEdgeScore(corners: CornerPoints): Float {
-        val nearest = corners.points.minOf { point -> minOf(point.x, point.y, 1f - point.x, 1f - point.y) }
-        return (0.75f + nearest.coerceIn(0f, 0.25f)).coerceAtMost(1f)
+    private fun boundarySupport(points: List<PixelPoint>, edges: Mat): Float {
+        var supported = 0
+        var samples = 0
+        points.indices.forEach { index ->
+            val start = points[index]
+            val end = points[(index + 1) % points.size]
+            val length = hypot((end.x - start.x).toDouble(), (end.y - start.y).toDouble())
+            val edgeSamples = (length / 12.0).roundToInt().coerceIn(16, 96)
+            for (step in 0..edgeSamples) {
+                val fraction = step.toFloat() / edgeSamples
+                val x = (start.x + (end.x - start.x) * fraction).roundToInt()
+                val y = (start.y + (end.y - start.y) * fraction).roundToInt()
+                val hasEdge = (-2..2).any { dy ->
+                    (-2..2).any { dx ->
+                        val sampleX = (x + dx).coerceIn(0, edges.cols() - 1)
+                        val sampleY = (y + dy).coerceIn(0, edges.rows() - 1)
+                        (edges.get(sampleY, sampleX)?.firstOrNull() ?: 0.0) > 0.0
+                    }
+                }
+                if (hasEdge) supported++
+                samples++
+            }
+        }
+        return if (samples == 0) 0f else supported.toFloat() / samples
     }
 
-    private fun Candidate.toResult(): DetectionResult {
+    /** Suppresses the image frame while keeping documents that legitimately approach one border. */
+    private fun imageFrameScore(corners: CornerPoints, areaRatio: Float): Float {
+        val nearBorderCount = corners.points.count { point ->
+            minOf(point.x, point.y, 1f - point.x, 1f - point.y) < FRAME_MARGIN
+        }
+        if (nearBorderCount == 4 && areaRatio > FRAME_AREA_RATIO) return 0.15f
+        return when (nearBorderCount) {
+            0, 1 -> 1f
+            2 -> 0.9f
+            else -> 0.7f
+        }
+    }
+
+    private fun Candidate.toResult(previewWidth: Int, previewHeight: Int): DetectionResult {
         val confidence = when {
             score >= 0.68f -> DetectionConfidence.HIGH
             score >= 0.48f -> DetectionConfidence.MEDIUM
             else -> DetectionConfidence.LOW
         }
-        return DetectionResult(corners.takeIf { confidence != DetectionConfidence.LOW }, confidence, score)
+        return DetectionResult(
+            corners = corners.takeIf { confidence != DetectionConfidence.LOW },
+            confidence = confidence,
+            score = score,
+            previewWidth = previewWidth,
+            previewHeight = previewHeight
+        )
     }
 
     private fun ensureInitialized() {
@@ -321,5 +380,7 @@ class OpenCvDocumentProcessor(
         const val PREVIEW_LONG_EDGE_PX = 1600
         const val DETECTION_LONG_EDGE_PX = 1600
         const val MINIMUM_AREA_RATIO = 0.12f
+        const val FRAME_MARGIN = 0.0125f
+        const val FRAME_AREA_RATIO = 0.90f
     }
 }

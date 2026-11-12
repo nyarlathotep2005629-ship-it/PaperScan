@@ -24,7 +24,7 @@ class PdfExporterStressInstrumentedTest {
     fun export_1_10_20_30Pages_completesWithoutRetainingAllPagesInMemory() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val testContext = InstrumentationRegistry.getInstrumentation().context
-        val files = WorkingFileStore(context)
+        val files = WorkingFileStore.forIsolatedTest(context)
         val processor = OpenCvDocumentProcessor(SourceImageLoader(context, files))
         val exporter = PdfExporter(processor, files)
 

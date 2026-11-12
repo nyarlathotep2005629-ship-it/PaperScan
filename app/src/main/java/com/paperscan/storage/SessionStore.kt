@@ -8,7 +8,14 @@ import com.paperscan.model.SourceType
 import com.paperscan.model.CornerPoints
 import com.paperscan.model.DetectionConfidence
 import com.paperscan.model.NormalizedPoint
+import com.paperscan.model.NormalizedTextBounds
+import com.paperscan.model.OcrStatus
+import com.paperscan.model.OcrTextLine
+import com.paperscan.model.PageOcrResult
+import com.paperscan.model.OcrLanguage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -18,35 +25,65 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
 class SessionStore(private val workingFileStore: WorkingFileStore) {
+    private val saveMutex = Mutex()
+
     sealed interface LoadResult {
         data object Missing : LoadResult
         data class Loaded(val session: ScanSession) : LoadResult
         data class Corrupted(val cause: Throwable) : LoadResult
     }
 
-    fun exists(): Boolean = workingFileStore.sessionFile.exists()
+    fun exists(): Boolean = workingFileStore.sessionFile.let { file ->
+        file.exists() || backupFor(file).exists()
+    }
 
     suspend fun load(): LoadResult = withContext(Dispatchers.IO) {
         val file = workingFileStore.sessionFile
-        if (!file.exists()) return@withContext LoadResult.Missing
-        runCatching { parse(file.readText(Charsets.UTF_8)) }
-            .fold(
+        saveMutex.withLock {
+            val primary = if (file.exists()) runCatching { parse(file.readText(Charsets.UTF_8)) } else null
+            primary?.getOrNull()?.let { return@withLock LoadResult.Loaded(it) }
+
+            val backup = backupFor(file)
+            if (backup.exists()) {
+                val recovered = runCatching { parse(backup.readText(Charsets.UTF_8)) }
+                recovered.getOrNull()?.let { session ->
+                    // A fallback rename can be interrupted after moving the old file to .bak.
+                    // Restore through a separate file; keep .bak intact if restoration fails.
+                    runCatching {
+                        val recovery = File(file.parentFile, "${file.name}.recovery")
+                        try {
+                            backup.copyTo(recovery, overwrite = true)
+                            Files.move(recovery.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                        } finally {
+                            recovery.delete()
+                        }
+                    }
+                    return@withLock LoadResult.Loaded(session)
+                }
+                if (primary == null) return@withLock LoadResult.Corrupted(recovered.exceptionOrNull()!!)
+            }
+            primary?.fold(
                 onSuccess = { LoadResult.Loaded(it) },
                 onFailure = { LoadResult.Corrupted(it) }
-            )
+            ) ?: LoadResult.Missing
+        }
     }
 
     suspend fun saveAtomic(session: ScanSession): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
+        saveMutex.withLock {
             val target = workingFileStore.sessionFile
-            target.parentFile?.mkdirs()
             val temporary = File(target.parentFile, "${target.name}.tmp")
-            FileOutputStream(temporary).use { output ->
-                output.write(serialize(session).toByteArray(Charsets.UTF_8))
-                output.fd.sync()
+            runCatching {
+                target.parentFile?.mkdirs()
+                FileOutputStream(temporary).use { output ->
+                    output.write(serialize(session).toByteArray(Charsets.UTF_8))
+                    output.fd.sync()
+                }
+                parse(temporary.readText(Charsets.UTF_8))
+                replacePreservingOldFile(temporary, target)
+            }.onFailure {
+                temporary.delete()
             }
-            parse(temporary.readText(Charsets.UTF_8))
-            replacePreservingOldFile(temporary, target)
         }
     }
 
@@ -70,9 +107,9 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
             // Some Android file systems do not support atomic replacement. Use a recoverable fallback.
         }
 
-        val backup = File(target.parentFile, "${target.name}.bak")
-        if (backup.exists() && !backup.delete()) error("以前のバックアップを削除できませんでした。")
+        val backup = backupFor(target)
         val hadTarget = target.exists()
+        if (hadTarget && backup.exists() && !backup.delete()) error("以前のバックアップを削除できませんでした。")
         if (hadTarget && !target.renameTo(backup)) error("既存セッションを退避できませんでした。")
         try {
             if (!temporary.renameTo(target)) error("新しいセッション情報を配置できませんでした。")
@@ -84,6 +121,8 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
             throw failure
         }
     }
+
+    private fun backupFor(target: File): File = File(target.parentFile, "${target.name}.bak")
 
     private fun serialize(session: ScanSession): String = JSONObject().apply {
         put("schemaVersion", session.schemaVersion)
@@ -99,10 +138,10 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
     private fun parse(text: String): ScanSession {
         val root = JSONObject(text)
         val schemaVersion = root.getInt("schemaVersion")
-        require(schemaVersion == ScanSession.CURRENT_SCHEMA_VERSION) { "未対応のセッション形式です。" }
+        require(schemaVersion in 1..ScanSession.CURRENT_SCHEMA_VERSION) { "未対応のセッション形式です。" }
         val pages = root.getJSONArray("pages").toPageItems()
         return ScanSession(
-            schemaVersion = schemaVersion,
+            schemaVersion = ScanSession.CURRENT_SCHEMA_VERSION,
             id = root.getString("id"),
             createdAtEpochMillis = root.getLong("createdAtEpochMillis"),
             updatedAtEpochMillis = root.getLong("updatedAtEpochMillis"),
@@ -122,6 +161,7 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
         put("rotationQuarterTurns", rotationQuarterTurns)
         put("scanMode", scanMode.name)
         put("status", status.name)
+        put("ocrLanguage", ocrLanguage.name)
         corners?.let { points ->
             put("corners", JSONArray().apply {
                 points.points.forEach { point ->
@@ -133,6 +173,25 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
             })
         }
         detectionConfidence?.let { put("detectionConfidence", it.name) }
+        ocrResult?.let { result ->
+            put("ocrResult", JSONObject().apply {
+                put("revision", result.revision)
+                put("status", result.status.name)
+                put("engine", result.engine)
+                put("updatedAtEpochMillis", result.updatedAtEpochMillis)
+                put("lines", JSONArray().apply {
+                    result.lines.forEach { line -> put(JSONObject().apply {
+                        put("text", line.text)
+                        put("bounds", JSONObject().apply {
+                            put("left", line.bounds.left)
+                            put("top", line.bounds.top)
+                            put("right", line.bounds.right)
+                            put("bottom", line.bounds.bottom)
+                        })
+                    }) }
+                })
+            })
+        }
     }
 
     private fun JSONArray.toPageItems(): List<PageItem> = List(length()) { index ->
@@ -151,7 +210,31 @@ class SessionStore(private val workingFileStore: WorkingFileStore) {
                 corners = json.optCorners(),
                 detectionConfidence = json.optString("detectionConfidence")
                     .takeIf { it.isNotBlank() }
-                    ?.let(DetectionConfidence::valueOf)
+                    ?.let(DetectionConfidence::valueOf),
+                ocrLanguage = OcrLanguage.valueOf(json.optString("ocrLanguage", OcrLanguage.AUTO.name)),
+                ocrResult = json.optJSONObject("ocrResult")?.let { result ->
+                    PageOcrResult(
+                        revision = result.getString("revision"),
+                        status = OcrStatus.valueOf(result.getString("status")),
+                        engine = result.optString("engine", PageOcrResult.ENGINE_VERSION),
+                        updatedAtEpochMillis = result.optLong("updatedAtEpochMillis", 0),
+                        lines = result.optJSONArray("lines")?.let { lines ->
+                            List(lines.length()) { lineIndex ->
+                                val line = lines.getJSONObject(lineIndex)
+                                val bounds = line.getJSONObject("bounds")
+                                OcrTextLine(
+                                    text = line.getString("text"),
+                                    bounds = NormalizedTextBounds(
+                                        left = bounds.getDouble("left").toFloat(),
+                                        top = bounds.getDouble("top").toFloat(),
+                                        right = bounds.getDouble("right").toFloat(),
+                                        bottom = bounds.getDouble("bottom").toFloat()
+                                    )
+                                )
+                            }
+                        } ?: emptyList()
+                    )
+                }
             )
         }
     }

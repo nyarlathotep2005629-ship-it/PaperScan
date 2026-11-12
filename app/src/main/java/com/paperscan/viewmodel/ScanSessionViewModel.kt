@@ -12,19 +12,30 @@ import com.paperscan.image.SourceImageLoader
 import com.paperscan.importer.PhotoImportService
 import com.paperscan.model.ScanSession
 import com.paperscan.model.SessionOperations
-import com.paperscan.model.CornerPoints
+import com.paperscan.model.CornerEditDraft
 import com.paperscan.model.DetectionConfidence
 import com.paperscan.model.NormalizedPoint
 import com.paperscan.model.PageItem
 import com.paperscan.model.PageStatus
+import com.paperscan.model.PageOcrResult
+import com.paperscan.model.OcrStatus
+import com.paperscan.model.ocrRevision
 import com.paperscan.model.ScanMode
+import com.paperscan.model.OcrLanguage
 import com.paperscan.model.SourceType
 import com.paperscan.pdf.ExportResult
 import com.paperscan.pdf.PdfExporter
+import com.paperscan.pdf.PdfExportSettings
+import com.paperscan.ocr.MlKitOcrService
 import com.paperscan.processing.DocumentProcessor
+import com.paperscan.processing.CameraFrameDocumentDetector
+import com.paperscan.processing.DetectionResult
 import com.paperscan.storage.SessionStore
 import com.paperscan.storage.WorkingFileStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -49,17 +60,20 @@ data class PageEditUiState(
     val pageId: String? = null,
     val original: android.graphics.Bitmap? = null,
     val corrected: android.graphics.Bitmap? = null,
+    val cornerDraft: CornerEditDraft? = null,
     val loading: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val ocrRunning: Boolean = false,
+    val ocrError: String? = null
 )
 
 sealed interface ExportUiState {
     data object Idle : ExportUiState
     data class Processing(val current: Int, val total: Int) : ExportUiState
-    data object ReadyToSave : ExportUiState
+    data class ReadyToSave(val searchable: Boolean) : ExportUiState
     data object Saving : ExportUiState
     data object Completed : ExportUiState
-    data class Failed(val message: String) : ExportUiState
+    data class Failed(val message: String, val searchable: Boolean = false) : ExportUiState
 }
 
 class ScanSessionViewModel(
@@ -70,7 +84,8 @@ class ScanSessionViewModel(
     private val sourceImageLoader: SourceImageLoader,
     private val documentProcessor: DocumentProcessor,
     private val pdfExporter: PdfExporter,
-    private val cameraCaptureService: CameraCaptureService
+    private val cameraCaptureService: CameraCaptureService,
+    private val ocrService: MlKitOcrService
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(ScanSessionUiState())
     val uiState: StateFlow<ScanSessionUiState> = _uiState.asStateFlow()
@@ -82,6 +97,14 @@ class ScanSessionViewModel(
     val pageEditUiState: StateFlow<PageEditUiState> = _pageEditUiState.asStateFlow()
 
     private var tempPdfFile: File? = null
+    private var tempPdfSearchable = false
+    private var editorLoadGeneration = 0L
+    private val ocrJobs = mutableMapOf<String, Job>()
+
+    /** Called only from CameraX's single background analysis executor. */
+    fun detectCameraFrame(bitmap: android.graphics.Bitmap): DetectionResult =
+        (documentProcessor as? CameraFrameDocumentDetector)?.detect(bitmap)
+            ?: DetectionResult(null, DetectionConfidence.LOW, previewWidth = bitmap.width, previewHeight = bitmap.height)
 
     fun initialize() = viewModelScope.launch {
         workingFileStore.cleanupStaleCache()
@@ -109,22 +132,8 @@ class ScanSessionViewModel(
                 uris = uris,
                 existingUris = base.pages.mapNotNull { it.sourceUri }.toSet()
             )
-            val importedIds = result.pages.map(PageItem::id).toSet()
-            val detectedPages = (base.pages + result.pages).map { page ->
-                if (page.id !in importedIds) {
-                    page
-                } else {
-                    val detection = runCatching { documentProcessor.detect(page) }
-                        .getOrElse { com.paperscan.processing.DetectionResult(null, DetectionConfidence.LOW) }
-                    page.copy(
-                        corners = detection.corners,
-                        detectionConfidence = detection.confidence,
-                        status = if (detection.confidence == DetectionConfidence.HIGH) PageStatus.READY else PageStatus.NEEDS_REVIEW
-                    )
-                }
-            }
             val updated = base.copy(
-                pages = detectedPages,
+                pages = base.pages + result.pages,
                 selectedPageId = base.selectedPageId ?: result.pages.firstOrNull()?.id,
                 updatedAtEpochMillis = now()
             )
@@ -185,12 +194,7 @@ class ScanSessionViewModel(
                 val (rotation, flipped) = sourceImageLoader.readExif(page)
                 page = page.copy(sourceExifRotationDegrees = rotation, sourceExifFlipped = flipped)
                 sourceImageLoader.createThumbnail(page)
-                val detection = documentProcessor.detect(page)
-                page.copy(
-                    corners = detection.corners,
-                    detectionConfidence = detection.confidence,
-                    status = if (detection.confidence == DetectionConfidence.HIGH) PageStatus.READY else PageStatus.NEEDS_REVIEW
-                )
+                page
             }
             result.onSuccess { page ->
                 val base = current.session ?: newSession()
@@ -214,6 +218,7 @@ class ScanSessionViewModel(
         val current = _uiState.value
         val session = current.session ?: return
         if (current.busy) return
+        ocrJobs.remove(pageId)?.cancel()
         viewModelScope.launch {
             val updated = SessionOperations.deletePage(session, pageId, now()) ?: return@launch
             _uiState.value = current.copy(busy = true, currentOperation = "ページを削除しています", error = null)
@@ -245,10 +250,46 @@ class ScanSessionViewModel(
         }
     }
 
-    fun openEditor(pageId: String) {
-        val page = _uiState.value.session?.pages?.firstOrNull { it.id == pageId } ?: return
+    fun applyScanModeToPages(pageIds: Set<String>, mode: ScanMode) {
+        val current = _uiState.value
+        val session = current.session ?: return
+        if (current.busy || pageIds.isEmpty()) return
+        val changedIds = session.pages.filter { it.id in pageIds && it.scanMode != mode }.map(PageItem::id)
+        if (changedIds.isEmpty()) return
+        changedIds.forEach { id -> ocrJobs.remove(id)?.cancel() }
         viewModelScope.launch {
-            _pageEditUiState.value = _pageEditUiState.value.copy(pageId = pageId, loading = true, error = null)
+            val latestState = _uiState.value
+            val latestSession = latestState.session ?: return@launch
+            if (latestState.busy) return@launch
+            val updated = SessionOperations.applyScanMode(latestSession, changedIds.toSet(), mode, now()) ?: return@launch
+            _uiState.value = latestState.copy(busy = true, currentOperation = "選択ページを補正しています", error = null)
+            if (persist(updated)) {
+                _uiState.value = ScanSessionUiState(
+                    initialized = true,
+                    session = updated,
+                    recoveryAvailable = updated.pages.isNotEmpty()
+                )
+                changedIds.forEach(::recognizePageInternal)
+            }
+        }
+    }
+
+    fun openEditor(pageId: String) {
+        openEditor(pageId, draftOverride = null)
+    }
+
+    private fun openEditor(pageId: String, draftOverride: CornerEditDraft?) {
+        val page = _uiState.value.session?.pages?.firstOrNull { it.id == pageId } ?: return
+        val generation = ++editorLoadGeneration
+        viewModelScope.launch {
+            _pageEditUiState.value = _pageEditUiState.value.copy(
+                pageId = pageId,
+                cornerDraft = draftOverride ?: _pageEditUiState.value.cornerDraft.takeIf {
+                    _pageEditUiState.value.pageId == pageId
+                },
+                loading = true,
+                error = null
+            )
             val previews = runCatching {
                 val original = documentProcessor.loadOriginalPreview(page)
                 try {
@@ -259,41 +300,99 @@ class ScanSessionViewModel(
                 }
             }
             previews.onSuccess { (original, corrected) ->
+                val detection = when {
+                    draftOverride != null || page.corners != null -> null
+                    else -> runCatching { documentProcessor.detect(page) }.getOrNull()
+                }
+                val draft = draftOverride
+                    ?: page.corners?.let(CornerEditDraft::fromSaved)
+                    ?: detection?.let { CornerEditDraft.fromDetection(it.corners, it.confidence) }
+                    ?: CornerEditDraft.manualFallback()
+                if (generation != editorLoadGeneration || _pageEditUiState.value.pageId != pageId) {
+                    original.recycle()
+                    corrected.recycle()
+                    return@onSuccess
+                }
                 releaseEditorBitmaps()
-                _pageEditUiState.value = PageEditUiState(pageId, original, corrected)
-            }.onFailure { failure ->
-                _pageEditUiState.value = PageEditUiState(pageId = pageId, error = "画像補正プレビューを作成できませんでした。")
+                _pageEditUiState.value = PageEditUiState(
+                    pageId = pageId,
+                    original = original,
+                    corrected = corrected,
+                    cornerDraft = draft,
+                    error = if (page.corners == null && draftOverride == null && detection?.corners == null) {
+                        "紙面を自動検出できませんでした。四隅を手動で調整してください。"
+                    } else {
+                        null
+                    }
+                )
+            }.onFailure {
+                if (generation == editorLoadGeneration) {
+                    _pageEditUiState.value = PageEditUiState(
+                        pageId = pageId,
+                        cornerDraft = draftOverride ?: page.corners?.let(CornerEditDraft::fromSaved),
+                        error = "画像補正プレビューを作成できませんでした。"
+                    )
+                }
             }
         }
     }
 
     fun closeEditor() {
+        editorLoadGeneration++
         releaseEditorBitmaps()
         _pageEditUiState.value = PageEditUiState()
     }
 
-    fun saveCorners(pageId: String, corners: CornerPoints) {
-        if (!corners.isValid()) {
-            _pageEditUiState.value = _pageEditUiState.value.copy(error = "四隅が交差しているか、範囲外または小さすぎます。")
+    fun updateEditorCorner(pageId: String, index: Int, point: NormalizedPoint) {
+        if (_uiState.value.busy) return
+        val state = _pageEditUiState.value
+        val draft = state.cornerDraft ?: return
+        if (state.pageId != pageId) return
+        _pageEditUiState.value = state.copy(cornerDraft = draft.moveCorner(index, point), error = null)
+    }
+
+    fun saveCorners(pageId: String) {
+        val draft = _pageEditUiState.value.cornerDraft
+        val corners = draft?.cornersToCommit()
+        if (corners == null) {
+            _pageEditUiState.value = _pageEditUiState.value.copy(
+                error = "四隅が交差しているか、凹形、範囲外または小さすぎるため保存できません。"
+            )
             return
         }
-        updatePage(pageId) { page ->
+        updatePage(pageId, recognizeAfter = true) { page ->
             page.copy(corners = corners, detectionConfidence = DetectionConfidence.MEDIUM, status = PageStatus.READY)
         }
     }
 
     fun rotatePageClockwise(pageId: String) {
-        updatePage(pageId) { page ->
-            val rotatedCorners = page.corners?.let(::rotateCornersClockwise)
+        val rotatedDraft = _pageEditUiState.value.cornerDraft?.rotateClockwise()
+        updatePage(pageId, preserveEditorDraft = true, draftOverride = rotatedDraft, recognizeAfter = true) { page ->
             page.copy(
                 rotationQuarterTurns = (page.rotationQuarterTurns + 1) % 4,
-                corners = rotatedCorners
+                corners = page.corners?.rotateClockwise()
             )
         }
     }
 
     fun updateScanMode(pageId: String, mode: ScanMode) {
-        updatePage(pageId, refreshEditor = true) { page -> page.copy(scanMode = mode) }
+        updatePage(
+            pageId,
+            refreshEditor = true,
+            preserveEditorDraft = true,
+            draftOverride = _pageEditUiState.value.cornerDraft,
+            recognizeAfter = true
+        ) { page -> page.copy(scanMode = mode) }
+    }
+
+    fun updateOcrLanguage(pageId: String, language: OcrLanguage) {
+        updatePage(pageId, recognizeAfter = true) { page -> page.copy(ocrLanguage = language) }
+    }
+
+    fun recognizePage(pageId: String) {
+        if (_uiState.value.busy) return
+        ocrJobs.remove(pageId)?.cancel()
+        recognizePageInternal(pageId, force = true)
     }
 
     fun redetectPage(pageId: String) {
@@ -303,36 +402,71 @@ class ScanSessionViewModel(
             _uiState.value = _uiState.value.copy(busy = true, currentOperation = "紙面を検出しています", error = null)
             val result = runCatching { documentProcessor.detect(page) }
             result.onSuccess { detection ->
-                updatePage(pageId, refreshEditor = true) { current ->
-                    current.copy(
-                        corners = detection.corners,
-                        detectionConfidence = detection.confidence,
-                        status = if (detection.confidence == DetectionConfidence.HIGH) PageStatus.READY else PageStatus.NEEDS_REVIEW
+                val currentEditor = _pageEditUiState.value
+                val updatedDraft = currentEditor.cornerDraft?.applyDetection(
+                    detection.corners,
+                    detection.confidence
+                )
+                if (currentEditor.pageId == pageId && updatedDraft != null) {
+                    _pageEditUiState.value = currentEditor.copy(cornerDraft = updatedDraft, error = null)
+                } else if (currentEditor.pageId == pageId) {
+                    _pageEditUiState.value = currentEditor.copy(
+                        error = "紙面を自動検出できませんでした。現在の四隅は維持されています。"
                     )
                 }
+                _uiState.value = _uiState.value.copy(busy = false, currentOperation = null)
             }.onFailure {
                 _uiState.value = _uiState.value.copy(
                     busy = false,
                     currentOperation = null,
-                    error = UiError("紙面を自動検出できませんでした。四隅を手動で指定してください。")
+                    error = UiError("紙面を自動検出できませんでした。現在の四隅は維持されています。")
                 )
             }
         }
     }
 
-    fun generatePdf() {
+    fun generatePdf(searchable: Boolean = false, settings: PdfExportSettings = PdfExportSettings()) {
         val session = _uiState.value.session ?: return
         if (_uiState.value.busy || session.pages.isEmpty()) return
         viewModelScope.launch {
+            tempPdfSearchable = searchable
             _uiState.value = _uiState.value.copy(busy = true, currentOperation = "PDFを作成しています", error = null)
+            ocrJobs.values.forEach(Job::cancel)
+            ocrJobs.clear()
             _exportUiState.value = ExportUiState.Processing(0, session.pages.size)
-            when (val result = pdfExporter.export(session) { current, total ->
+            var exportSession = session
+            if (searchable) {
+                session.pages.forEachIndexed { index, page ->
+                    val stored = page.ocrResult?.takeIf { it.revision == page.ocrRevision() }
+                    val ocrResult = stored ?: runCatching { recognizePageContent(page) }.getOrElse {
+                        PageOcrResult(
+                            revision = page.ocrRevision(),
+                            status = OcrStatus.FAILED,
+                            lines = emptyList(),
+                            updatedAtEpochMillis = now()
+                        )
+                    }
+                    exportSession = exportSession.copy(
+                        pages = exportSession.pages.map { if (it.id == page.id) it.copy(ocrResult = ocrResult) else it },
+                        updatedAtEpochMillis = now()
+                    )
+                    if (persist(exportSession)) {
+                        _uiState.value = _uiState.value.copy(session = exportSession, recoveryAvailable = true)
+                    }
+                    _exportUiState.value = ExportUiState.Processing(index + 1, session.pages.size)
+                }
+            }
+            when (val result = pdfExporter.export(
+                exportSession,
+                includeSearchableText = searchable,
+                settings = settings
+            ) { current, total ->
                 _exportUiState.value = ExportUiState.Processing(current, total)
             }) {
                 is ExportResult.Success -> {
                     tempPdfFile = result.tempFile
                     _uiState.value = _uiState.value.copy(busy = false, currentOperation = null)
-                    _exportUiState.value = ExportUiState.ReadyToSave
+                    _exportUiState.value = ExportUiState.ReadyToSave(searchable)
                 }
                 is ExportResult.Failure -> {
                     _uiState.value = _uiState.value.copy(
@@ -340,7 +474,7 @@ class ScanSessionViewModel(
                         currentOperation = null,
                         error = UiError("PDFを作成できませんでした。作業データは保持されています。")
                     )
-                    _exportUiState.value = ExportUiState.Failed("PDFの作成に失敗しました。")
+                    _exportUiState.value = ExportUiState.Failed("PDFの作成に失敗しました。", searchable)
                 }
             }
         }
@@ -349,7 +483,7 @@ class ScanSessionViewModel(
     fun savePdfTo(destination: Uri) {
         val session = _uiState.value.session ?: return
         val source = tempPdfFile?.takeIf(File::exists) ?: run {
-            _exportUiState.value = ExportUiState.Failed("保存するPDFがありません。もう一度作成してください。")
+            _exportUiState.value = ExportUiState.Failed("保存するPDFがありません。もう一度作成してください。", tempPdfSearchable)
             return
         }
         if (_uiState.value.busy) return
@@ -377,7 +511,7 @@ class ScanSessionViewModel(
                     currentOperation = null,
                     error = UiError("PDFを保存できませんでした。作業データは保持されています。")
                 )
-                _exportUiState.value = ExportUiState.ReadyToSave
+                _exportUiState.value = ExportUiState.ReadyToSave(tempPdfSearchable)
             }
         }
     }
@@ -390,8 +524,17 @@ class ScanSessionViewModel(
         }
     }
 
+    fun changePdfSettings() {
+        if (_exportUiState.value !is ExportUiState.ReadyToSave) return
+        tempPdfFile?.delete()
+        tempPdfFile = null
+        _exportUiState.value = ExportUiState.Idle
+    }
+
     fun discardSession() {
         if (_uiState.value.busy) return
+        ocrJobs.values.forEach(Job::cancel)
+        ocrJobs.clear()
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(busy = true, currentOperation = "作業データを破棄しています", error = null)
             sessionStore.delete()
@@ -409,25 +552,39 @@ class ScanSessionViewModel(
 
     suspend fun loadThumbnail(page: com.paperscan.model.PageItem) = sourceImageLoader.loadThumbnail(page)
 
-    private fun updatePage(pageId: String, refreshEditor: Boolean = true, transform: (PageItem) -> PageItem) {
+    private fun updatePage(
+        pageId: String,
+        refreshEditor: Boolean = true,
+        preserveEditorDraft: Boolean = false,
+        draftOverride: CornerEditDraft? = null,
+        recognizeAfter: Boolean = false,
+        transform: (PageItem) -> PageItem
+    ) {
         val current = _uiState.value
         val session = current.session ?: return
         val oldPage = session.pages.firstOrNull { it.id == pageId } ?: return
+        ocrJobs.remove(pageId)?.cancel()
         viewModelScope.launch {
-            val updated = session.copy(
-                pages = session.pages.map { page -> if (page.id == pageId) transform(page) else page },
+            val latestState = _uiState.value
+            val latestSession = latestState.session ?: return@launch
+            val updated = latestSession.copy(
+                pages = latestSession.pages.map { page ->
+                    if (page.id != pageId) page else transform(page).let { transformed ->
+                        if (transformed.ocrRevision() != page.ocrRevision()) transformed.copy(ocrResult = null) else transformed
+                    }
+                },
                 updatedAtEpochMillis = now()
             )
-            _uiState.value = current.copy(busy = true, currentOperation = "ページ補正を保存しています", error = null)
+            _uiState.value = latestState.copy(busy = true, currentOperation = "ページ補正を保存しています", error = null)
             if (persist(updated)) {
                 _uiState.value = ScanSessionUiState(initialized = true, session = updated, recoveryAvailable = true)
-                if (refreshEditor && _pageEditUiState.value.pageId == pageId) openEditor(pageId)
+                if (refreshEditor && _pageEditUiState.value.pageId == pageId) {
+                    openEditor(pageId, if (preserveEditorDraft) draftOverride else null)
+                }
+                if (recognizeAfter) recognizePageInternal(pageId)
             }
         }
     }
-
-    private fun rotateCornersClockwise(corners: CornerPoints): CornerPoints? =
-        CornerPoints.fromUnordered(corners.points.map { point -> NormalizedPoint(1f - point.y, point.x) })
 
     private fun releaseEditorBitmaps() {
         _pageEditUiState.value.original?.takeIf { !it.isRecycled }?.recycle()
@@ -435,6 +592,8 @@ class ScanSessionViewModel(
     }
 
     override fun onCleared() {
+        ocrJobs.values.forEach(Job::cancel)
+        ocrJobs.clear()
         releaseEditorBitmaps()
         super.onCleared()
     }
@@ -450,6 +609,71 @@ class ScanSessionViewModel(
             return false
         }
         return true
+    }
+
+    private fun recognizePageInternal(pageId: String, force: Boolean = false) {
+        if (ocrJobs[pageId]?.isActive == true) return
+        val page = _uiState.value.session?.pages?.firstOrNull { it.id == pageId } ?: return
+        val revision = page.ocrRevision()
+        if (!force && page.ocrResult?.let { it.revision == revision && it.status == OcrStatus.COMPLETE } == true) return
+        lateinit var job: Job
+        job = viewModelScope.launch {
+            if (_pageEditUiState.value.pageId == pageId) {
+                _pageEditUiState.value = _pageEditUiState.value.copy(ocrRunning = true, ocrError = null)
+            }
+            try {
+                val result = recognizePageContent(page)
+                persistOcrResult(pageId, revision, result)
+                if (_pageEditUiState.value.pageId == pageId) {
+                    _pageEditUiState.value = _pageEditUiState.value.copy(
+                        ocrRunning = false,
+                        ocrError = if (result.status == OcrStatus.FAILED) "文字を認識できませんでした。再試行できます。" else null
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                if (_pageEditUiState.value.pageId == pageId) {
+                    _pageEditUiState.value = _pageEditUiState.value.copy(
+                        ocrRunning = false,
+                        ocrError = "OCRに失敗しました。画像と編集内容は保持されています。"
+                    )
+                }
+            } finally {
+                if (ocrJobs[pageId] === job) ocrJobs.remove(pageId)
+            }
+        }
+        ocrJobs[pageId] = job
+    }
+
+    private suspend fun persistOcrResult(pageId: String, revision: String, result: PageOcrResult): Boolean {
+        while (_uiState.value.busy) delay(25)
+        val latestState = _uiState.value
+        val latestSession = latestState.session ?: return false
+        val latestPage = latestSession.pages.firstOrNull { it.id == pageId } ?: return false
+        if (latestPage.ocrRevision() != revision) return false
+        val updated = latestSession.copy(
+            pages = latestSession.pages.map { if (it.id == pageId) it.copy(ocrResult = result) else it },
+            updatedAtEpochMillis = now()
+        )
+        _uiState.value = latestState.copy(busy = true, currentOperation = "OCR結果を保存しています")
+        if (!persist(updated)) return false
+        _uiState.value = _uiState.value.copy(
+            busy = false,
+            currentOperation = null,
+            session = updated,
+            recoveryAvailable = true
+        )
+        return true
+    }
+
+    private suspend fun recognizePageContent(page: PageItem): PageOcrResult {
+        val bitmap = withContext(Dispatchers.IO) { documentProcessor.processForExport(page) }
+        return try {
+            ocrService.recognize(bitmap, page.ocrRevision(), now(), page.ocrLanguage)
+        } finally {
+            bitmap.recycle()
+        }
     }
 
     private fun importMessage(result: com.paperscan.importer.ImportResult): UiError? = when {
@@ -483,7 +707,8 @@ class ScanSessionViewModel(
                 container.sourceImageLoader,
                 container.documentProcessor,
                 container.pdfExporter,
-                container.cameraCaptureService
+                container.cameraCaptureService,
+                container.ocrService
             ) as T
         }
     }
