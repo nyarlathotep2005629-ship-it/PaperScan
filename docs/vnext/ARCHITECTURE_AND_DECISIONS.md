@@ -1,6 +1,6 @@
 # PaperScan vNext アーキテクチャと技術判断
 
-更新日: 2026-11-05
+更新日: 2026-11-12
 実装状態と検証境界は[監査記録](AUDIT.md)および[検証・リリース計画](TEST_AND_RELEASE.md)を参照。
 
 ## 現在の処理フロー
@@ -41,14 +41,13 @@ CameraXは`Preview`、`ImageCapture`、`ImageAnalysis`を同一`UseCaseGroup`と
 
 公式資料: [ML Kit Android Text Recognition v2](https://developers.google.com/ml-kit/vision/text-recognition/v2/android)、[対応言語](https://developers.google.com/ml-kit/vision/text-recognition/v2/languages)、[モデル配置方式](https://developers.google.com/ml-kit/tips/installation-paths)、[ML Kit利用条件](https://developers.google.com/ml-kit/terms)。ライセンス・利用条件を把握するための技術確認であり、法的評価ではない。
 
-## 検索可能PDF: 既存JPEG writerへToUnicode文字層を追加
+## 検索可能PDF: JPEG画像と自己完結の不可視文字層
 
 - Android標準`PdfDocument`は既存実装のページ画像出力に使っていたが、今回の画像品質上限とUnicode文字レイヤーを制御する小さな逐次PDF writerを追加した。ページごとに補正画像をJPEG化して書き込み、Bitmapは出力直後に解放する。
 - OCR行は正規化矩形をPDF画像の配置矩形へ写し、PDF text rendering mode `3`で不可視文字として置く。コードポイントごとにUnicode UTF-16BEを対応付けたToUnicode CMapを生成する。
-- `PDFBox-Android 2.0.27.0`は本体依存にせずInstrumented Testだけで使用する。PoCでPDFからの英語・日本語・簡体字・繁体字・韓国語抽出、ToUnicodeの存在、Android `PdfRenderer`上の文字不可視を確認した。
-- Noto CJKのシステムTTCをPDFBoxで埋め込む試行は、CFF/OpenType形式とsubset処理の非互換に当たり、当面の実装には使わなかった。現行writerは日本語CIDフォント名を参照するがフォントファイルを埋め込まない。PDFBoxのテキスト抽出成功から、Android/iOS/デスクトップviewerでの検索・選択・コピーや見た目の互換性を推定しない。
-- 現行の`Identity-H`文字コード指定とFontFileを含まないフォント辞書は互換性上の未解決事項。Adobe [PDF Reference 1.4](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.4.pdf)のフォント要件を含め、埋め込み方式と実viewerでの確認が必要。
-- 技術実証としてはPDFパーサー抽出がPASS。一般viewerでの手動検証を終えるまで、完全な検索可能PDF対応やRelease適格とは扱わない。
+- 2026-11-12に、フォントファイルを持たないCIDFontType2を廃止した。不可視文字層は空の字形をPDF内部に定義するType 3フォントとToUnicodeで構成する。1フォント255種類までの文字コード制限を超えるCJKページではフォントを分割する。新しいフォントファイル・ライブラリは同梱しない。
+- `PDFBox-Android 2.0.27.0`はInstrumented Test専用。多言語・補助平面文字・300種類のCJKを抽出し、Android `PdfRenderer`で不可視を確認。外部のpdfplumberでも多言語文字列と領域を抽出し、Popplerで構造と描画を確認した。詳細は[継続検証記録](testing/2026-11-12_CONTINUATION.md)。
+- 技術実証としてPDF解析はPASS。一般GUIビューアでの検索、選択、コピーの手動検証は残るため、完全な検索可能PDF対応やRelease適格とは扱わない。
 
 PDFBox-Androidの一次資料: [README / ライセンス](https://github.com/TomRoush/PdfBox-Android)、[リリース一覧](https://github.com/TomRoush/PdfBox-Android/releases)。
 

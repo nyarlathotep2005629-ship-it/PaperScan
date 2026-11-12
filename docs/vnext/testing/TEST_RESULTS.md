@@ -1,5 +1,7 @@
 # PaperScan vNext 第2次開発 テスト実行結果・品質評価
 
+このページは2026-11-05時点の履歴記録。最新のコード・テスト・PDF方式は[2026-11-12 継続開発・検証記録](2026-11-12_CONTINUATION.md)を参照。
+
 実行日: 2026-11-05
 
 実行ブランチ: `codex/paperscan-vnext-foundation`

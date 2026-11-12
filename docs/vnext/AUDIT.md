@@ -1,5 +1,7 @@
 # PaperScan vNext 現行監査
 
+この監査の数値とPDF方式は2026-11-05時点。今回の変更と最新の判定は[2026-11-12 継続開発・検証記録](testing/2026-11-12_CONTINUATION.md)を参照。
+
 監査・更新日: 2026-11-05
 対象: `codex/paperscan-vnext-foundation` の作業ツリー
 比較基準: 作業開始時の `02c352b`（`main` / `origin/main`）
